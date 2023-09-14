@@ -3075,7 +3075,7 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 	__attribute__((unused)) int packet_size)
 {
 	struct gdb_connection *gdb_connection = connection->priv;
-	struct target *target = get_available_target_from_connection(connection);
+	struct target *target = get_target_from_connection(connection);
 	const char *parse = packet;
 	int retval;
 
