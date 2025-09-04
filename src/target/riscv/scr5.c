@@ -320,6 +320,7 @@ struct target_type scr5_target = {
 	.get_gdb_arch = riscv_get_gdb_arch,
 	.get_gdb_reg_list = riscv_get_gdb_reg_list,
 	.get_gdb_reg_list_noread = riscv_get_gdb_reg_list_noread,
+	.get_default_breakpoint_length = riscv_get_default_breakpoint_length,
 	.add_breakpoint = riscv_add_breakpoint,
 	.remove_breakpoint = riscv_remove_breakpoint,
 	.add_watchpoint = riscv_add_watchpoint,

@@ -551,5 +551,7 @@ int riscv_write_by_any_size(struct target *target, target_addr_t address, uint32
 
 int riscv_interrupts_disable(struct target *target, uint64_t ie_mask, uint64_t *old_mstatus);
 int riscv_interrupts_restore(struct target *target, uint64_t old_mstatus);
+int riscv_get_default_breakpoint_length(struct target *target, target_addr_t addr,
+	uint32_t asid, int hw, unsigned int *length);
 
 #endif /* OPENOCD_TARGET_RISCV_RISCV_H */

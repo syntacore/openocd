@@ -1595,7 +1595,7 @@ int riscv_read_by_any_size(struct target *target, target_addr_t address, uint32_
 	return ERROR_FAIL;
 }
 
-static int riscv_get_default_breakpoint_length(struct target *target, target_addr_t addr,
+int riscv_get_default_breakpoint_length(struct target *target, target_addr_t addr,
 	uint32_t asid, int hw, unsigned int *length)
 {
 	*length = riscv_supports_extension(target, 'c') ? 2 : 4;
