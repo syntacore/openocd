@@ -456,7 +456,7 @@ int riscv_openocd_step(
 );
 
 struct riscv_private_config *alloc_default_riscv_private_config(void);
-int riscv_create_target(struct target *target, Jim_Interp *interp);
+int riscv_create_target(struct target *target);
 
 int riscv_jim_configure(struct target *target,
 		struct jim_getopt_info *goi);
