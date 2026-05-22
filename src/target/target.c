@@ -3126,8 +3126,22 @@ COMMAND_HANDLER(handle_reg_command)
 	/* display a register */
 	if ((CMD_ARGC == 1) || ((CMD_ARGC == 2) && !((CMD_ARGV[1][0] >= '0')
 			&& (CMD_ARGV[1][0] <= '9')))) {
-		if ((CMD_ARGC == 2) && (strcmp(CMD_ARGV[1], "force") == 0))
+		if (CMD_ARGC == 2 && strcmp(CMD_ARGV[1], "force") == 0
+				&& reg->valid) {
+			if (reg->dirty) {
+				char *value = buf_to_hex_str(reg->value, reg->size);
+				if (!value) {
+					LOG_ERROR("Out of memory");
+					return ERROR_FAIL;
+				}
+				LOG_TARGET_WARNING(target,
+						"Discarding the cached write of 0x%s to register %s",
+						value, reg->name);
+				free(value);
+				reg->dirty = false;
+			}
 			reg->valid = false;
+		}
 
 		if (!reg->valid) {
 			int retval = reg->type->get(reg);
