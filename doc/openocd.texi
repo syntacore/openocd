@@ -6507,6 +6507,7 @@ speed depends on the @var{-freq} variable and has the value of
 @var{freq/0xfffe}. The default value is @var{1000000}.
 @item @var{-chip_select} ... Chip select pin. The default value
 is @var{0}.
+@item @var{-hssi} ... set to use with HSSI controller version.
 @item @var{-timeout} ... flash communication timeout in
 seconds. The default value is @var{600}.
 @end itemize
