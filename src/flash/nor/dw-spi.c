@@ -50,12 +50,13 @@
  * This structure defines some implementation specific variables.
  */
 struct dw_spi_regmap {
-	uint32_t freq; ///< Clock frequency.
 	target_addr_t simc; ///< Absolute offset of SIMC register block.
 	target_addr_t spi_mst;
 	///< Absolute offset of ICPU_CFG:SPI_MST register. 0 if not available.
+	uint32_t freq; ///< Clock frequency.
 	uint8_t si_if_owner_offset;
 	///< Offset of \ref si_mode bits in ICPU_CFG:SPI_MST.
+	bool hssi; ///< HSSI IP.
 };
 
 /**
@@ -98,11 +99,22 @@ enum dw_spi_si_mode {
 #define DW_SPI_REG_IMR 0x2c ///< Interrupt configuration register.
 #define DW_SPI_REG_DR 0x60 ///< Data register.
 
-#define DW_SPI_REG_CTRLR0_DFS(x) ((x) & GENMASK(3, 0)) ///< Data frame size.
-#define DW_SPI_REG_CTRLR0_FRF(x) (((x) << 4) & GENMASK(5, 4)) ///< SI protocol.
-#define DW_SPI_REG_CTRLR0_SCPH(x) ((!!(x)) << 6) ///< Probe position.
-#define DW_SPI_REG_CTRLR0_SCPOL(x) ((!!(x)) << 7) ///< Probe polarity.
-#define DW_SPI_REG_CTRLR0_TMOD(x) (((x) << 8) & GENMASK(9, 8)) ///< SI mode.
+#define DW_SPI_REG_PSSI_CTRLR0_DFS(x) ((x) & GENMASK(3, 0))
+///< Data frame size.
+#define DW_SPI_REG_HSSI_CTRLR0_DFS(x) ((x) & GENMASK(4, 0))
+///< Data frame size.
+#define DW_SPI_REG_PSSI_CTRLR0_FRF(x) (((x) << 4) & GENMASK(5, 4))
+ ///< SI protocol.
+#define DW_SPI_REG_HSSI_CTRLR0_FRF(x) (((x) << 6) & GENMASK(7, 6))
+ ///< SI protocol.
+#define DW_SPI_REG_PSSI_CTRLR0_SCPH(x) ((!!(x)) << 6) ///< Probe position.
+#define DW_SPI_REG_HSSI_CTRLR0_SCPH(x) ((!!(x)) << 8) ///< Probe position.
+#define DW_SPI_REG_PSSI_CTRLR0_SCPOL(x) ((!!(x)) << 7) ///< Probe polarity.
+#define DW_SPI_REG_HSSI_CTRLR0_SCPOL(x) ((!!(x)) << 9) ///< Probe polarity.
+#define DW_SPI_REG_PSSI_CTRLR0_TMOD(x) (((x) << 8) & GENMASK(9, 8))
+ ///< SI mode.
+#define DW_SPI_REG_HSSI_CTRLR0_TMOD(x) (((x) << 10) & GENMASK(11, 10))
+ ///< SI mode.
 #define DW_SPI_REG_SIMCEN_SIMCEN(x) (!!(x)) ///< Controller enable.
 #define DW_SPI_REG_SER_SER(x) ((x) & GENMASK(15, 0)) ///< Slave select bitmask.
 #define DW_SPI_REG_BAUDR_SCKDV(x) ((x) & GENMASK(15, 0)) ///< Clock divisor.
@@ -268,11 +280,16 @@ dw_spi_ctrl_configure_si(const struct flash_bank *const bank)
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
 	// 8 bit frame; Motorola protocol; middle lo probe; TX RX mode
-	const uint32_t mode = DW_SPI_REG_CTRLR0_DFS(0x7) |
-						  DW_SPI_REG_CTRLR0_FRF(0) |
-						  DW_SPI_REG_CTRLR0_SCPH(0) |
-						  DW_SPI_REG_CTRLR0_SCPOL(0) |
-						  DW_SPI_REG_CTRLR0_TMOD(0);
+	const uint32_t mode = regmap->hssi ? DW_SPI_REG_HSSI_CTRLR0_DFS(0x7) |
+											 DW_SPI_REG_HSSI_CTRLR0_FRF(0) |
+											 DW_SPI_REG_HSSI_CTRLR0_SCPH(0) |
+											 DW_SPI_REG_HSSI_CTRLR0_SCPOL(0) |
+											 DW_SPI_REG_HSSI_CTRLR0_TMOD(0)
+									   : DW_SPI_REG_PSSI_CTRLR0_DFS(0x7) |
+											 DW_SPI_REG_PSSI_CTRLR0_FRF(0) |
+											 DW_SPI_REG_PSSI_CTRLR0_SCPH(0) |
+											 DW_SPI_REG_PSSI_CTRLR0_SCPOL(0) |
+											 DW_SPI_REG_PSSI_CTRLR0_TMOD(0);
 
 	int ret = target_write_u32(target, regmap->simc + DW_SPI_REG_CTRLR0, mode);
 	if (ret) {
@@ -1288,6 +1305,8 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 			unsigned int cs_bit;
 			COMMAND_PARSE_NUMBER(uint, CMD_ARGV[++idx], cs_bit);
 			chip_select_bitmask = BIT(cs_bit);
+		} else if (strcmp(CMD_ARGV[idx], "-hssi") == 0) {
+			regmap.hssi = true;
 		} else {
 			LOG_WARNING("DW SPI unknown argument %s", CMD_ARGV[idx]);
 		}
