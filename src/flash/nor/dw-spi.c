@@ -143,6 +143,84 @@ const char *dw_spi_arg_reg[DW_SPI_TARGET_MAX] = {
 	[DW_SPI_TARGET_MIPS32] = "r4",
 };
 
+static struct mips32_algorithm mips32_algo = {
+	.common_magic = MIPS32_COMMON_MAGIC, .isa_mode = MIPS32_ISA_MIPS32};
+
+static const uint8_t misp32_target_code_tr[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-transaction.inc"
+};
+
+/**
+ * @brief Transaction function loaders.
+ */
+static const struct target_code_info target_codes_tr[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_tr,
+		.size = sizeof(misp32_target_code_tr),
+		.arch_info = (void *)&mips32_algo,
+	},
+};
+
+static const uint8_t misp32_target_code_fill[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-check_fill.inc"
+};
+
+/**
+ * @brief Check fill function loaders.
+ */
+static const struct target_code_info target_codes_fill[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_fill,
+		.size = sizeof(misp32_target_code_fill),
+		.arch_info = (void *)&mips32_algo,
+	},
+};
+
+static const uint8_t misp32_target_code_prg[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-program.inc"
+};
+
+/**
+ * @brief Program function loaders.
+ */
+static const struct target_code_info target_codes_prg[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_prg,
+		.size = sizeof(misp32_target_code_prg),
+		.arch_info = (void *)&mips32_algo,
+	},
+};
+
+static const uint8_t misp32_target_code_erase[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-erase.inc"
+};
+
+/**
+ * @brief Erase function loaders.
+ */
+static const struct target_code_info target_codes_erase[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_erase,
+		.size = sizeof(misp32_target_code_erase),
+		.arch_info = (void *)&mips32_algo,
+	},
+};
+
+static const uint8_t misp32_target_code_read[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-read.inc"
+};
+
+/**
+ * @brief Read function loaders.
+ */
+static const struct target_code_info target_codes_read[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_read,
+		.size = sizeof(misp32_target_code_read),
+		.arch_info = (void *)&mips32_algo,
+	},
+};
+
 /**
  * @brief Driver private state.
  */
@@ -397,22 +475,9 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	struct mips32_algorithm mips32_algo = {.common_magic = MIPS32_COMMON_MAGIC,
-										   .isa_mode = MIPS32_ISA_MIPS32};
-
-	static const uint8_t misp32_target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-transaction.inc"
-	};
-	struct target_code_info target_codes[DW_SPI_TARGET_MAX] = {
-		[DW_SPI_TARGET_MIPS32] = {
-			.code = misp32_target_code,
-			.size = sizeof(misp32_target_code),
-			.arch_info = (void *)&mips32_algo,
-		},
-	};
-	const uint8_t *target_code = target_codes[driver->target].code;
-	const size_t target_code_size = target_codes[driver->target].size;
-	void *target_arch_info = target_codes[driver->target].arch_info;
+	const uint8_t *target_code = target_codes_tr[driver->target].code;
+	const size_t target_code_size = target_codes_tr[driver->target].size;
+	void *target_arch_info = target_codes_tr[driver->target].arch_info;
 	const unsigned int address_bits = target_address_bits(target);
 
 	const size_t total_working_area_size =
@@ -535,22 +600,9 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	struct mips32_algorithm mips32_algo = {.common_magic = MIPS32_COMMON_MAGIC,
-										   .isa_mode = MIPS32_ISA_MIPS32};
-
-	static const uint8_t misp32_target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-check_fill.inc"
-	};
-	struct target_code_info target_codes[DW_SPI_TARGET_MAX] = {
-		[DW_SPI_TARGET_MIPS32] = {
-			.code = misp32_target_code,
-			.size = sizeof(misp32_target_code),
-			.arch_info = (void *)&mips32_algo,
-		},
-	};
-	const uint8_t *target_code = target_codes[driver->target].code;
-	const size_t target_code_size = target_codes[driver->target].size;
-	void *target_arch_info = target_codes[driver->target].arch_info;
+	const uint8_t *target_code = target_codes_fill[driver->target].code;
+	const size_t target_code_size = target_codes_fill[driver->target].size;
+	void *target_arch_info = target_codes_fill[driver->target].arch_info;
 	const unsigned int address_bits = target_address_bits(target);
 
 	const size_t total_working_area_size =
@@ -675,22 +727,9 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	struct mips32_algorithm mips32_algo = {.common_magic = MIPS32_COMMON_MAGIC,
-										   .isa_mode = MIPS32_ISA_MIPS32};
-
-	static const uint8_t misp32_target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-program.inc"
-	};
-	struct target_code_info target_codes[DW_SPI_TARGET_MAX] = {
-		[DW_SPI_TARGET_MIPS32] = {
-			.code = misp32_target_code,
-			.size = sizeof(misp32_target_code),
-			.arch_info = (void *)&mips32_algo,
-		},
-	};
-	const uint8_t *target_code = target_codes[driver->target].code;
-	const size_t target_code_size = target_codes[driver->target].size;
-	void *target_arch_info = target_codes[driver->target].arch_info;
+	const uint8_t *target_code = target_codes_prg[driver->target].code;
+	const size_t target_code_size = target_codes_prg[driver->target].size;
+	void *target_arch_info = target_codes_prg[driver->target].arch_info;
 	const unsigned int address_bits = target_address_bits(target);
 
 	const size_t total_working_area_size =
@@ -813,22 +852,9 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	struct mips32_algorithm mips32_algo = {.common_magic = MIPS32_COMMON_MAGIC,
-										   .isa_mode = MIPS32_ISA_MIPS32};
-
-	static const uint8_t misp32_target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-erase.inc"
-	};
-	struct target_code_info target_codes[DW_SPI_TARGET_MAX] = {
-		[DW_SPI_TARGET_MIPS32] = {
-			.code = misp32_target_code,
-			.size = sizeof(misp32_target_code),
-			.arch_info = (void *)&mips32_algo,
-		},
-	};
-	const uint8_t *target_code = target_codes[driver->target].code;
-	const size_t target_code_size = target_codes[driver->target].size;
-	void *target_arch_info = target_codes[driver->target].arch_info;
+	const uint8_t *target_code = target_codes_erase[driver->target].code;
+	const size_t target_code_size = target_codes_erase[driver->target].size;
+	void *target_arch_info = target_codes_erase[driver->target].arch_info;
 	const unsigned int address_bits = target_address_bits(target);
 
 	const size_t total_working_area_size =
@@ -925,22 +951,9 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	struct mips32_algorithm mips32_algo = {.common_magic = MIPS32_COMMON_MAGIC,
-										   .isa_mode = MIPS32_ISA_MIPS32};
-
-	static const uint8_t misp32_target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-read.inc"
-	};
-	struct target_code_info target_codes[DW_SPI_TARGET_MAX] = {
-		[DW_SPI_TARGET_MIPS32] = {
-			.code = misp32_target_code,
-			.size = sizeof(misp32_target_code),
-			.arch_info = (void *)&mips32_algo,
-		},
-	};
-	const uint8_t *target_code = target_codes[driver->target].code;
-	const size_t target_code_size = target_codes[driver->target].size;
-	void *target_arch_info = target_codes[driver->target].arch_info;
+	const uint8_t *target_code = target_codes_read[driver->target].code;
+	const size_t target_code_size = target_codes_read[driver->target].size;
+	void *target_arch_info = target_codes_read[driver->target].arch_info;
 	const unsigned int address_bits = target_address_bits(target);
 
 	const size_t total_working_area_size =
