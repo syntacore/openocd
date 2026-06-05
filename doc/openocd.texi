@@ -6491,17 +6491,17 @@ Mandatory driver's arguments are
 calculation.
 @item @var{-simc} ... @var{SIMC} register block absolute address.
 This value is the same as for Linux's driver device tree register field.
+@end itemize
+
+Optional driver's arguments are
+
+@itemize
 @item @var{-spi_mst} ... @var{SPI_MST} register address. When available,
 it is used for switching between SPI Boot and Master controllers. This
 value is the same as for Linux's driver device tree register field
 second argument. Set to @var{0} if SPI Boot controller not available.
 @item @var{-if_owner_offset} ... offset of @var{if_owner} field inside
 @var{SPI_MST} register. Set to @var{0} if SPI Boot controller not available.
-@end itemize
-
-Optional driver's arguments are
-
-@itemize
 @item @var{-speed} ... SPI device communication speed in Hz. Minimal
 speed depends on the @var{-freq} variable and has the value of
 @var{freq/0xfffe}. The default value is @var{1000000}.
