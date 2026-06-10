@@ -18,11 +18,6 @@
  * by Boot or Master controller. For these devices, additional configuration of
  * spi_mst address is required to switch between the two.
  *
- * Currently supported devices typically have much more RAM then NOR Flash
- * (Jaguar2 reference design has 256MB RAM and 32MB NOR Flash), so supporting
- * work-area sizes smaller then transfer buffer seems like the unnecessary
- * complication.
- *
  * This code was tested on Jaguar2 VSC7448 connected to Macronix MX25L25635F.
  */
 
@@ -34,6 +29,7 @@
 #include "imp.h"
 #include "spi.h"
 
+#include <helper/align.h>
 #include <helper/bits.h>
 #include <helper/time_support.h>
 #include <target/algorithm.h>
@@ -1242,30 +1238,63 @@ dw_spi_blank_check(struct flash_bank *bank, size_t sector_count,
 {
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 
+	const size_t max_workarea_size =
+		target_get_working_area_avail(bank->target);
+	const size_t helper_size =
+		ALIGN_UP(target_codes_fill[driver->target].size, 4) +
+		ALIGN_UP(sizeof(struct dw_spi_check_fill), 4);
+
+	if (max_workarea_size < helper_size + 4) {
+		LOG_ERROR("insufficient workarea size, need 0x%zx", helper_size + 4);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	}
+
+	const size_t total_buffer_size =
+		MIN(max_workarea_size, helper_size + sector_count);
+	const size_t buffer_size = total_buffer_size - helper_size;
+
+	if (!buffer_size) {
+		LOG_ERROR("invalid buffer size");
+		return ERROR_BUF_TOO_SMALL;
+	}
+
+	const unsigned int read_iterations =
+		(sector_count / buffer_size + (sector_count % buffer_size > 0));
+
 	uint8_t *erased = malloc(sector_count);
 	if (!erased) {
 		LOG_ERROR("could not allocate memory");
 		return ERROR_FAIL;
 	}
+	uint8_t *const erased_buffer = erased;
 
 	// set initial erased value to unknown
 	memset(erased, 2, sector_count);
 	for (unsigned int sector_idx = 0; sector_idx < sector_count; sector_idx++)
 		bank->sectors[sector_idx].is_erased = 2;
 
-	int ret = dw_spi_ctrl_check_sectors_fill(bank, 0, bank->sectors[0].size,
-											 sector_count, pattern,
+	int ret;
+	for (size_t iter = 0, count = sector_count; iter < read_iterations;
+		 iter++, erased += buffer_size, count -= buffer_size) {
+		uint32_t address = iter * buffer_size * bank->sectors[0].size;
+		ret = dw_spi_ctrl_check_sectors_fill(bank, address,
+											 bank->sectors[0].size,
+											 MIN(count, buffer_size), pattern,
 											 driver->spi_flash->read_cmd,
 											 erased);
+		if (ret)
+			break;
+	}
+
 	if (!ret) {
 		for (unsigned int sector_idx = 0; sector_idx < sector_count;
 			 sector_idx++)
-			bank->sectors[sector_idx].is_erased = erased[sector_idx];
+			bank->sectors[sector_idx].is_erased = erased_buffer[sector_idx];
 	} else {
 		LOG_ERROR("DW SPI flash erase check error");
 	}
 
-	free(erased);
+	free(erased_buffer);
 
 	return ret;
 }
@@ -1286,39 +1315,125 @@ dw_spi_write_buffer(const struct flash_bank *const bank, const uint8_t *buffer,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const size_t page_size = driver->spi_flash->pagesize;
 
-	// Write unaligned first sector separately as helper function does
-	// not handle this case well.
-	struct {
-		uint32_t address;
-		const uint8_t *buffer;
-		size_t count;
-	} chunks[2] = {
-		{ .address = offset, .buffer = buffer, .count = 0 },
-		{ .address = offset, .buffer = buffer, .count = count },
-	};
+	const size_t max_workarea_size =
+		target_get_working_area_avail(bank->target);
+	const size_t helper_size =
+		ALIGN_UP(target_codes_prg[driver->target].size, 4) +
+		ALIGN_UP(sizeof(struct dw_spi_program), 4);
 
-	if (offset % page_size) {
-		// start is not aligned
-		chunks[0].count = MIN(page_size - (offset % page_size), count);
-		chunks[1].count -= chunks[0].count;
-		chunks[1].address += chunks[0].count;
-		chunks[1].buffer += chunks[0].count;
+	if (max_workarea_size < helper_size + 4) {
+		LOG_ERROR("insufficient workarea size, need 0x%zx", helper_size + 4);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 	}
 
-	for (unsigned int chunk_idx = 0; chunk_idx < ARRAY_SIZE(chunks);
-		 chunk_idx++) {
-		if (chunks[chunk_idx].count > 0) {
-			int ret = dw_spi_ctrl_program(bank, chunks[chunk_idx].address,
-										  chunks[chunk_idx].buffer,
-										  chunks[chunk_idx].count, page_size,
-										  SPIFLASH_READ_STATUS,
-										  SPIFLASH_WRITE_ENABLE,
-										  driver->spi_flash->pprog_cmd,
-										  SPIFLASH_WE_BIT, SPIFLASH_BSY_BIT);
-			if (ret) {
-				LOG_ERROR("DW SPI flash write error");
-				return ret;
+	const size_t total_buffer_size =
+		MIN(max_workarea_size, helper_size + count);
+	const size_t buffer_size = total_buffer_size - helper_size;
+
+	if (!buffer_size) {
+		LOG_ERROR("invalid buffer size");
+		return ERROR_BUF_TOO_SMALL;
+	}
+
+	const unsigned int write_iterations =
+		(count / buffer_size + (count % buffer_size > 0));
+
+	// Outer loop deals with buffer size bigger than workarea size,
+	// inner loop deals with alignment issues.
+	for (unsigned int iter = 0; iter < write_iterations; iter++,
+					  offset += buffer_size, buffer += buffer_size,
+					  count -= buffer_size) {
+		// Write unaligned first sector separately as helper function does
+		// not handle this case well.
+		struct {
+			uint32_t address;
+			const uint8_t *buffer;
+			size_t count;
+		} chunks[2] = {
+			{.address = offset, .buffer = buffer, .count = 0},
+			{.address = offset,
+			 .buffer = buffer,
+			 .count = MIN(buffer_size, count)},
+		};
+
+		if (offset % page_size) {
+			// start is not aligned
+			chunks[0].count =
+				MIN(page_size - (offset % page_size), MIN(buffer_size, count));
+			chunks[1].count -= chunks[0].count;
+			chunks[1].address += chunks[0].count;
+			chunks[1].buffer += chunks[0].count;
+		}
+
+		for (unsigned int chunk_idx = 0; chunk_idx < ARRAY_SIZE(chunks);
+			 chunk_idx++) {
+			if (chunks[chunk_idx].count > 0) {
+				int ret = dw_spi_ctrl_program(bank, chunks[chunk_idx].address,
+											  chunks[chunk_idx].buffer,
+											  chunks[chunk_idx].count,
+											  page_size, SPIFLASH_READ_STATUS,
+											  SPIFLASH_WRITE_ENABLE,
+											  driver->spi_flash->pprog_cmd,
+											  SPIFLASH_WE_BIT,
+											  SPIFLASH_BSY_BIT);
+				if (ret) {
+					LOG_ERROR("DW SPI flash write error");
+					return ret;
+				}
 			}
+		}
+	}
+
+	return ERROR_OK;
+}
+
+/**
+ * @brief Read data from flash to buffer.
+ *
+ * @param[in] bank: Flash bank handle.
+ * @param[out] buffer: Data buffer.
+ * @param[in] offset: Flash address offset.
+ * @param[in] count: \p buffer size.
+ * @return Command execution status.
+ */
+static int
+dw_spi_read_buffer(const struct flash_bank *const bank, uint8_t *buffer,
+				   uint32_t offset, uint32_t count)
+{
+	const struct dw_spi_driver *const driver = bank->driver_priv;
+
+	const size_t max_workarea_size =
+		target_get_working_area_avail(bank->target);
+	const size_t helper_size =
+		ALIGN_UP(target_codes_read[driver->target].size, 4) +
+		ALIGN_UP(sizeof(struct dw_spi_read), 4);
+
+	if (max_workarea_size < helper_size + 4) {
+		LOG_ERROR("insufficient workarea size, need 0x%zx", helper_size + 4);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	}
+
+	const size_t total_buffer_size =
+		MIN(max_workarea_size, helper_size + count);
+	const size_t buffer_size = total_buffer_size - helper_size;
+
+	if (!buffer_size) {
+		LOG_ERROR("invalid buffer size");
+		return ERROR_BUF_TOO_SMALL;
+	}
+
+	const unsigned int read_iterations =
+		(count / buffer_size + (count % buffer_size > 0));
+
+	for (unsigned int iter = 0; iter < read_iterations; iter++,
+					  offset += buffer_size, buffer += buffer_size,
+					  count -= buffer_size) {
+		int ret =
+			dw_spi_ctrl_read(bank, offset, buffer, MIN(buffer_size, count),
+							 driver->spi_flash->read_cmd);
+		if (ret) {
+			LOG_ERROR("DW SPI flash read error");
+			return ret;
 		}
 	}
 
@@ -1644,14 +1759,11 @@ static int
 dw_spi_read(struct flash_bank *bank, uint8_t *buffer, uint32_t offset,
 			uint32_t count)
 {
-	struct dw_spi_driver *const driver = bank->driver_priv;
-
 	int ret = dw_spi_master_ctrl_configure(bank);
 	if (ret)
 		return ret;
 
-	ret = dw_spi_ctrl_read(bank, offset, buffer, count,
-						   driver->spi_flash->read_cmd);
+	ret = dw_spi_read_buffer(bank, buffer, offset, count);
 	dw_spi_master_ctrl_restore(bank);
 	return ret;
 }
