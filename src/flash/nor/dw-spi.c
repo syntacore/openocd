@@ -487,7 +487,7 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -496,7 +496,7 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_transaction),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -504,7 +504,7 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, size, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -612,7 +612,7 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -621,7 +621,7 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_check_fill),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -629,7 +629,7 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, sector_count, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -739,7 +739,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -748,7 +748,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_program),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -756,7 +756,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, buffer_size, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -864,7 +864,7 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -873,7 +873,7 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_erase),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -963,7 +963,7 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -972,7 +972,7 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_read),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -980,7 +980,7 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, buffer_size, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
