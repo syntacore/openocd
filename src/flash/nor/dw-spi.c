@@ -300,7 +300,7 @@ dw_spi_ctrl_mode(const struct flash_bank *const bank, enum dw_spi_si_mode mode)
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	if (!regmap->spi_mst)
+	if (regmap->spi_mst == UINT64_MAX)
 		return ERROR_OK;
 
 	uint32_t ctrl;
@@ -339,7 +339,7 @@ dw_spi_ctrl_mode_configure(const struct flash_bank *const bank,
 	struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	if (!regmap->spi_mst)
+	if (regmap->spi_mst == UINT64_MAX)
 		return ERROR_OK;
 
 	uint32_t ctrl;
@@ -1521,7 +1521,10 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 	unsigned int speed = 1000000;
 	unsigned int timeout = DW_SPI_TIMEOUT_DEFAULT;
 	uint8_t chip_select_bitmask = BIT(0);
-	struct dw_spi_regmap regmap = { 0 };
+	struct dw_spi_regmap regmap = {
+		.simc = UINT64_MAX,
+		.spi_mst = UINT64_MAX,
+	};
 
 	if (CMD_ARGC < 6)
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1558,7 +1561,7 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 		}
 	}
 
-	if (!regmap.simc) {
+	if (regmap.simc == UINT64_MAX) {
 		LOG_ERROR("DW SPI cannot use boot controller with unconfigured simc");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
