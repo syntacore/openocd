@@ -422,7 +422,7 @@ static int hwthread_create(struct target *target)
 	target->rtos->thread_details = NULL;
 	target->rtos->gdb_target_for_threadid = hwthread_target_for_threadid;
 	target->rtos->gdb_thread_packet = hwthread_thread_packet;
-	return 0;
+	return ERROR_OK;
 }
 
 static bool hwthread_needs_fake_step(struct target *target, int64_t thread_id)
