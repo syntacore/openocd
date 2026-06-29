@@ -1577,7 +1577,6 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 	driver->speed = speed;
 	driver->timeout = timeout;
 	driver->chip_select_bitmask = chip_select_bitmask;
-	driver->four_byte_mode = true; // 24bit commands not provided by spi.h
 	memcpy(&driver->regmap, &regmap, sizeof(regmap));
 
 	return ERROR_OK;
@@ -1728,6 +1727,7 @@ dw_spi_probe(struct flash_bank *bank)
 		}
 	}
 	bank->num_sectors = bank->size / driver->spi_flash->sectorsize;
+	driver->four_byte_mode = bank->size > 0x1000000;
 
 	// free previously allocated in case of reprobing
 	free(bank->sectors);
