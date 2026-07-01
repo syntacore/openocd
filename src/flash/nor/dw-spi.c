@@ -28,6 +28,7 @@
 #include "dw-spi-helper.h"
 #include "imp.h"
 #include "spi.h"
+#include "sfdp.h"
 
 #include <helper/align.h>
 #include <helper/bits.h>
@@ -259,7 +260,6 @@ static const struct target_code_info target_codes_read[DW_SPI_TARGET_MAX] = {
  * @brief Driver private state.
  */
 struct dw_spi_driver {
-	const struct flash_device *spi_flash; ///< SPI flash device info.
 	uint32_t id; ///< Chip ID.
 	unsigned int speed; ///< Flash speed.
 	unsigned int timeout; ///< Flash timeout in milliseconds.
@@ -269,6 +269,7 @@ struct dw_spi_driver {
 	uint8_t chip_select_bitmask; ///< Chip select bitmask.
 	bool four_byte_mode; ///< Flash chip is in 32bit address mode.
 	bool probed; ///< Bank is probed.
+	struct flash_device spi_flash; ///< SPI flash device info.
 	struct dw_spi_regmap regmap; ///< SI controller regmap.
 };
 
@@ -1213,7 +1214,7 @@ dw_spi_erase_chip(const struct flash_bank *const bank)
 		return ret;
 
 	memset(buffer, 0, buffer_size);
-	buffer[0] = driver->spi_flash->chip_erase_cmd;
+	buffer[0] = driver->spi_flash.chip_erase_cmd;
 
 	ret = dw_spi_ctrl_transaction(bank, buffer, buffer_size, false);
 	if (ret) {
@@ -1252,11 +1253,11 @@ dw_spi_erase_sectors(const struct flash_bank *const bank, unsigned int first,
 	} else {
 		// partial erase
 		int ret = dw_spi_ctrl_erase_sectors(bank, bank->sectors[first].offset,
-											driver->spi_flash->sectorsize,
+											driver->spi_flash.sectorsize,
 											last - first + 1,
 											SPIFLASH_READ_STATUS,
 											SPIFLASH_WRITE_ENABLE,
-											driver->spi_flash->erase_cmd,
+											driver->spi_flash.erase_cmd,
 											SPIFLASH_WE_BIT, SPIFLASH_BSY_BIT);
 		if (ret) {
 			LOG_ERROR("DW SPI flash erase sectors error");
@@ -1318,7 +1319,7 @@ dw_spi_blank_check(struct flash_bank *bank, size_t sector_count,
 		ret = dw_spi_ctrl_check_sectors_fill(bank, address,
 											 bank->sectors[0].size,
 											 MIN(count, buffer_size), pattern,
-											 driver->spi_flash->read_cmd,
+											 driver->spi_flash.read_cmd,
 											 erased);
 		if (ret)
 			break;
@@ -1351,7 +1352,7 @@ dw_spi_write_buffer(const struct flash_bank *const bank, const uint8_t *buffer,
 					uint32_t offset, uint32_t count)
 {
 	const struct dw_spi_driver *const driver = bank->driver_priv;
-	const size_t page_size = driver->spi_flash->pagesize;
+	const size_t page_size = driver->spi_flash.pagesize;
 
 	const size_t max_workarea_size =
 		target_get_working_area_avail(bank->target);
@@ -1411,7 +1412,7 @@ dw_spi_write_buffer(const struct flash_bank *const bank, const uint8_t *buffer,
 											  chunks[chunk_idx].count,
 											  page_size, SPIFLASH_READ_STATUS,
 											  SPIFLASH_WRITE_ENABLE,
-											  driver->spi_flash->pprog_cmd,
+											  driver->spi_flash.pprog_cmd,
 											  SPIFLASH_WE_BIT,
 											  SPIFLASH_BSY_BIT);
 				if (ret) {
@@ -1468,7 +1469,7 @@ dw_spi_read_buffer(const struct flash_bank *const bank, uint8_t *buffer,
 					  count -= buffer_size) {
 		int ret =
 			dw_spi_ctrl_read(bank, offset, buffer, MIN(buffer_size, count),
-							 driver->spi_flash->read_cmd);
+							 driver->spi_flash.read_cmd);
 		if (ret) {
 			LOG_ERROR("DW SPI flash read error");
 			return ret;
@@ -1496,16 +1497,16 @@ dw_spi_spiflash_search(const struct flash_bank *const bank)
 	unsigned int idx = 0;
 	while (flash_devices[idx].name) {
 		if (flash_devices[idx].device_id == driver->id) {
-			driver->spi_flash = &flash_devices[idx];
+			memcpy(&driver->spi_flash, &flash_devices[idx],
+				   sizeof(driver->spi_flash));
 			return ERROR_OK;
 		}
 		idx++;
 	}
 
-	LOG_ERROR("DW SPI could not find Flash with ID %" PRIx32
-			  " in SPI Flash table: either Flash device is not supported "
-			  "or communication speed is too high",
-			  driver->id);
+	LOG_INFO("DW SPI could not find Flash with ID %" PRIx32
+			 " in SPI Flash table",
+			 driver->id);
 	return ERROR_FAIL;
 }
 
@@ -1668,6 +1669,72 @@ dw_spi_master_ctrl_restore(struct flash_bank *bank)
 }
 
 /**
+ * @brief Read SFDP block.
+ *
+ * Used by spi_sfdp() SFDP decoder command.
+ *
+ * @param[in] bank: Flash bank handle.
+ * @param[in] addr: Offset into SFDP header.
+ * @param[in] words: Number of header words to read.
+ * @param[out] buffer: Buffer to write header to.
+ * @return Command execution status.
+ */
+static int
+dw_spi_read_sfdp_block(struct flash_bank *bank, uint32_t addr,
+					   unsigned int words, uint32_t *buffer)
+{
+	// add at most 8 dummy words
+	const size_t payload_max_offset = 1 + 3 + 8 * sizeof(uint32_t);
+	const size_t buf_size = payload_max_offset + words * sizeof(uint32_t);
+	uint8_t *buf = malloc(buf_size);
+	uint8_t *payload = NULL;
+
+	if (!buf) {
+		LOG_ERROR("could not allocate memory");
+		return ERROR_FAIL;
+	}
+
+	// find header magic position
+	memset(buf, 0, buf_size);
+	buf[0] = SPIFLASH_READ_SFDP;
+
+	int ret = dw_spi_ctrl_transaction(bank, buf, buf_size, true);
+	if (ret)
+		goto err;
+
+	for (unsigned int idx = 0; idx < payload_max_offset; idx++) {
+		if (le_to_h_u32(&buf[idx]) == SFDP_MAGIC) {
+			payload = buf + idx;
+			break;
+		}
+	}
+
+	if (!payload) {
+		LOG_INFO("SFDP header not found");
+		ret = ERROR_FLASH_OPER_UNSUPPORTED;
+		goto err;
+	}
+
+	memset(buf, 0, buf_size);
+	buf[0] = SPIFLASH_READ_SFDP;
+	buf[1] = (addr >> 16) & 0xff;
+	buf[2] = (addr >> 8) & 0xff;
+	buf[3] = (addr >> 0) & 0xff;
+
+	ret = dw_spi_ctrl_transaction(bank, buf, buf_size, true);
+	if (ret)
+		goto err;
+
+	for (; words > 0; words--, buffer++, payload += sizeof(uint32_t))
+		*buffer = le_to_h_u32(payload);
+
+err:
+	free(buf);
+
+	return ret;
+}
+
+/**
  * @brief Flash bank probe.
  *
  * @param[in] bank: Flash bank handle.
@@ -1703,13 +1770,20 @@ dw_spi_probe(struct flash_bank *bank)
 		return ret;
 
 	ret = dw_spi_spiflash_search(bank);
-	if (ret)
-		goto err;
+	if (ret) {
+		ret = spi_sfdp(bank, &driver->spi_flash, dw_spi_read_sfdp_block);
+		if (ret) {
+			LOG_ERROR("DW SPI could not probe Flash device. "
+					  "Either it is not supported "
+					  "or communication speed is too high");
+			goto err;
+		}
+	}
 
 	bank->write_start_alignment = 0;
 	bank->write_end_alignment = 0;
 
-	uint32_t flash_size = driver->spi_flash->size_in_bytes;
+	uint32_t flash_size = driver->spi_flash.size_in_bytes;
 	if (!bank->size) {
 		bank->size = flash_size;
 		LOG_INFO("DW SPI probed flash size 0x%" PRIx32, flash_size);
@@ -1726,14 +1800,14 @@ dw_spi_probe(struct flash_bank *bank)
 			goto err;
 		}
 	}
-	bank->num_sectors = bank->size / driver->spi_flash->sectorsize;
+	bank->num_sectors = bank->size / driver->spi_flash.sectorsize;
 	driver->four_byte_mode = bank->size > 0x1000000;
 
 	// free previously allocated in case of reprobing
 	free(bank->sectors);
 
 	bank->sectors =
-		alloc_block_array(0, driver->spi_flash->sectorsize, bank->num_sectors);
+		alloc_block_array(0, driver->spi_flash.sectorsize, bank->num_sectors);
 
 	if (!bank->sectors) {
 		LOG_ERROR("could not allocate memory");
@@ -1842,7 +1916,7 @@ static int
 dw_spi_info(struct flash_bank *bank, struct command_invocation *cmd)
 {
 	const struct dw_spi_driver *const driver = bank->driver_priv;
-	command_print(cmd, "model %s", driver->spi_flash->name);
+	command_print(cmd, "model %s", driver->spi_flash.name);
 	command_print(cmd, "ID 0x%" PRIx32, driver->id);
 	command_print_sameline(cmd, "size 0x%" PRIx32, bank->size);
 	return ERROR_OK;
