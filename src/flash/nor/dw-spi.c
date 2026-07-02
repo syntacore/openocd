@@ -35,6 +35,7 @@
 #include <target/algorithm.h>
 #include <target/breakpoints.h>
 #include <target/mips32.h>
+#include <target/riscv/riscv.h>
 #include <target/target_type.h>
 
 /**
@@ -120,6 +121,7 @@ enum dw_spi_si_mode {
  */
 enum dw_spi_target {
 	DW_SPI_TARGET_MIPS32,
+	DW_SPI_TARGET_RISCV64,
 	DW_SPI_TARGET_MAX,
 };
 
@@ -137,6 +139,7 @@ struct target_code_info {
  */
 const char *dw_spi_arg_reg[DW_SPI_TARGET_MAX] = {
 	[DW_SPI_TARGET_MIPS32] = "r4",
+	[DW_SPI_TARGET_RISCV64] = "a0",
 };
 
 static struct mips32_algorithm mips32_algo = {
@@ -144,6 +147,9 @@ static struct mips32_algorithm mips32_algo = {
 
 static const uint8_t misp32_target_code_tr[] = {
 #include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-transaction.inc"
+};
+static const uint8_t riscv64_target_code_tr[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-transaction.inc"
 };
 
 /**
@@ -155,10 +161,17 @@ static const struct target_code_info target_codes_tr[DW_SPI_TARGET_MAX] = {
 		.size = sizeof(misp32_target_code_tr),
 		.arch_info = (void *)&mips32_algo,
 	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_tr,
+		.size = sizeof(riscv64_target_code_tr),
+	},
 };
 
 static const uint8_t misp32_target_code_fill[] = {
 #include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-check_fill.inc"
+};
+static const uint8_t riscv64_target_code_fill[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-check_fill.inc"
 };
 
 /**
@@ -170,10 +183,17 @@ static const struct target_code_info target_codes_fill[DW_SPI_TARGET_MAX] = {
 		.size = sizeof(misp32_target_code_fill),
 		.arch_info = (void *)&mips32_algo,
 	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_fill,
+		.size = sizeof(riscv64_target_code_fill),
+	},
 };
 
 static const uint8_t misp32_target_code_prg[] = {
 #include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-program.inc"
+};
+static const uint8_t riscv64_target_code_prg[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-program.inc"
 };
 
 /**
@@ -185,10 +205,17 @@ static const struct target_code_info target_codes_prg[DW_SPI_TARGET_MAX] = {
 		.size = sizeof(misp32_target_code_prg),
 		.arch_info = (void *)&mips32_algo,
 	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_prg,
+		.size = sizeof(riscv64_target_code_prg),
+	},
 };
 
 static const uint8_t misp32_target_code_erase[] = {
 #include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-erase.inc"
+};
+static const uint8_t riscv64_target_code_erase[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-erase.inc"
 };
 
 /**
@@ -200,10 +227,17 @@ static const struct target_code_info target_codes_erase[DW_SPI_TARGET_MAX] = {
 		.size = sizeof(misp32_target_code_erase),
 		.arch_info = (void *)&mips32_algo,
 	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_erase,
+		.size = sizeof(riscv64_target_code_erase),
+	},
 };
 
 static const uint8_t misp32_target_code_read[] = {
 #include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-read.inc"
+};
+static const uint8_t riscv64_target_code_read[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-read.inc"
 };
 
 /**
@@ -214,6 +248,10 @@ static const struct target_code_info target_codes_read[DW_SPI_TARGET_MAX] = {
 		.code = misp32_target_code_read,
 		.size = sizeof(misp32_target_code_read),
 		.arch_info = (void *)&mips32_algo,
+	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_read,
+		.size = sizeof(riscv64_target_code_read),
 	},
 };
 
@@ -1649,6 +1687,9 @@ dw_spi_probe(struct flash_bank *bank)
 	driver->target = DW_SPI_TARGET_MAX;
 	if (!strcmp(bank->target->type->name, mips_m4k_target.name))
 		driver->target = DW_SPI_TARGET_MIPS32;
+	if (!strcmp(bank->target->type->name, riscv_target.name)
+		&& target_address_bits(bank->target) == 64)
+		driver->target = DW_SPI_TARGET_RISCV64;
 	if (driver->target == DW_SPI_TARGET_MAX) {
 		LOG_ERROR("DW SPI currently does not support target %s",
 				  bank->target->type->name);
