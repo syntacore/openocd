@@ -4,9 +4,12 @@ TESTS =
 
 if DUMMY
 TESTS += \
+	test-target-create-command.cfg \
+	test-target-configure-cget-command.cfg \
 	test-jtag-execute-command.cfg \
 	test-irscan-command.cfg \
-	test-drscan-command.cfg
+	test-drscan-command.cfg \
+	test-target-smp-command.cfg
 endif
 
 EXTRA_DIST = utils.tcl $(TESTS)

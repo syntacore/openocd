@@ -219,69 +219,69 @@ struct reg_cache *embeddedice_build_reg_cache(struct target *target,
 	LOG_INFO("Embedded ICE version %d", eice_version);
 
 	switch (eice_version) {
-		case 1:
-			/* ARM7TDMI r3, ARM7TDMI-S r3
-			 *
-			 * REVISIT docs say ARM7TDMI-S r4 uses version 1 but
-			 * that it has 6-bit CTRL and 5-bit STAT... doc bug?
-			 * ARM7TDMI r4 docs say EICE v4.
-			 */
-			reg_list[EICE_DBG_CTRL].size = 3;
-			reg_list[EICE_DBG_STAT].size = 5;
+	case 1:
+		/* ARM7TDMI r3, ARM7TDMI-S r3
+		 *
+		 * REVISIT docs say ARM7TDMI-S r4 uses version 1 but
+		 * that it has 6-bit CTRL and 5-bit STAT... doc bug?
+		 * ARM7TDMI r4 docs say EICE v4.
+		 */
+		reg_list[EICE_DBG_CTRL].size = 3;
+		reg_list[EICE_DBG_STAT].size = 5;
+		break;
+	case 2:
+		/* ARM9TDMI */
+		reg_list[EICE_DBG_CTRL].size = 4;
+		reg_list[EICE_DBG_STAT].size = 5;
+		arm7_9->has_single_step = 1;
+		break;
+	case 3:
+		LOG_ERROR("EmbeddedICE v%d handling might be broken",
+				eice_version);
+		reg_list[EICE_DBG_CTRL].size = 6;
+		reg_list[EICE_DBG_STAT].size = 5;
+		arm7_9->has_single_step = 1;
+		arm7_9->has_monitor_mode = 1;
+		break;
+	case 4:
+		/* ARM7TDMI r4 */
+		reg_list[EICE_DBG_CTRL].size = 6;
+		reg_list[EICE_DBG_STAT].size = 5;
+		arm7_9->has_monitor_mode = 1;
+		break;
+	case 5:
+		/* ARM9E-S rev 1 */
+		reg_list[EICE_DBG_CTRL].size = 6;
+		reg_list[EICE_DBG_STAT].size = 5;
+		arm7_9->has_single_step = 1;
+		arm7_9->has_monitor_mode = 1;
+		break;
+	case 6:
+		/* ARM7EJ-S, ARM9E-S rev 2, ARM9EJ-S */
+		reg_list[EICE_DBG_CTRL].size = 6;
+		reg_list[EICE_DBG_STAT].size = 10;
+		/* DBG_STAT has MOE bits */
+		arm7_9->has_monitor_mode = 1;
+		break;
+	case 7:
+		LOG_ERROR("EmbeddedICE v%d handling might be broken",
+				eice_version);
+		reg_list[EICE_DBG_CTRL].size = 6;
+		reg_list[EICE_DBG_STAT].size = 5;
+		arm7_9->has_monitor_mode = 1;
+		break;
+	default:
+		/*
+		 * The Feroceon implementation has the version number
+		 * in some unusual bits.  Let feroceon.c validate it
+		 * and do the appropriate setup itself.
+		 */
+		if (strcmp(target_type_name(target), "feroceon") == 0 ||
+				strcmp(target_type_name(target), "dragonite") == 0)
 			break;
-		case 2:
-			/* ARM9TDMI */
-			reg_list[EICE_DBG_CTRL].size = 4;
-			reg_list[EICE_DBG_STAT].size = 5;
-			arm7_9->has_single_step = 1;
-			break;
-		case 3:
-			LOG_ERROR("EmbeddedICE v%d handling might be broken",
-					eice_version);
-			reg_list[EICE_DBG_CTRL].size = 6;
-			reg_list[EICE_DBG_STAT].size = 5;
-			arm7_9->has_single_step = 1;
-			arm7_9->has_monitor_mode = 1;
-			break;
-		case 4:
-			/* ARM7TDMI r4 */
-			reg_list[EICE_DBG_CTRL].size = 6;
-			reg_list[EICE_DBG_STAT].size = 5;
-			arm7_9->has_monitor_mode = 1;
-			break;
-		case 5:
-			/* ARM9E-S rev 1 */
-			reg_list[EICE_DBG_CTRL].size = 6;
-			reg_list[EICE_DBG_STAT].size = 5;
-			arm7_9->has_single_step = 1;
-			arm7_9->has_monitor_mode = 1;
-			break;
-		case 6:
-			/* ARM7EJ-S, ARM9E-S rev 2, ARM9EJ-S */
-			reg_list[EICE_DBG_CTRL].size = 6;
-			reg_list[EICE_DBG_STAT].size = 10;
-			/* DBG_STAT has MOE bits */
-			arm7_9->has_monitor_mode = 1;
-			break;
-		case 7:
-			LOG_ERROR("EmbeddedICE v%d handling might be broken",
-					eice_version);
-			reg_list[EICE_DBG_CTRL].size = 6;
-			reg_list[EICE_DBG_STAT].size = 5;
-			arm7_9->has_monitor_mode = 1;
-			break;
-		default:
-			/*
-			 * The Feroceon implementation has the version number
-			 * in some unusual bits.  Let feroceon.c validate it
-			 * and do the appropriate setup itself.
-			 */
-			if (strcmp(target_type_name(target), "feroceon") == 0 ||
-					strcmp(target_type_name(target), "dragonite") == 0)
-				break;
-			LOG_ERROR("unknown EmbeddedICE version "
-				"(comms ctrl: 0x%8.8" PRIx32 ")",
-				buf_get_u32(reg_list[EICE_COMMS_CTRL].value, 0, 32));
+		LOG_ERROR("unknown EmbeddedICE version "
+			"(comms ctrl: 0x%8.8" PRIx32 ")",
+			buf_get_u32(reg_list[EICE_COMMS_CTRL].value, 0, 32));
 	}
 
 	/* On Feroceon and Dragonite the second unit is seemingly missing. */
@@ -502,7 +502,7 @@ void embeddedice_write_reg(struct reg *reg, uint32_t value)
 {
 	struct embeddedice_reg *ice_reg = reg->arch_info;
 
-	LOG_DEBUG("%i: 0x%8.8" PRIx32 "", ice_reg->addr, value);
+	LOG_DEBUG("%i: 0x%8.8" PRIx32, ice_reg->addr, value);
 
 	arm_jtag_scann(ice_reg->jtag_info, 0x2, TAP_IDLE);
 
@@ -574,7 +574,7 @@ int embeddedice_send(struct arm_jtag *jtag_info, uint32_t *data, uint32_t size)
 /**
  * Poll DCC control register until read or write handshake completes.
  */
-int embeddedice_handshake(struct arm_jtag *jtag_info, int hsbit, uint32_t timeout)
+int embeddedice_handshake(struct arm_jtag *jtag_info, int hsbit, uint32_t timeout_ms)
 {
 	struct scan_field fields[3];
 	uint8_t field0_in[4];
@@ -582,8 +582,6 @@ int embeddedice_handshake(struct arm_jtag *jtag_info, int hsbit, uint32_t timeou
 	uint8_t field2_out[1];
 	int retval;
 	uint32_t hsact;
-	struct timeval now;
-	struct timeval timeout_end;
 
 	if (hsbit == EICE_COMM_CTRL_WBIT)
 		hsact = 1;
@@ -616,8 +614,8 @@ int embeddedice_handshake(struct arm_jtag *jtag_info, int hsbit, uint32_t timeou
 	fields[2].in_value = NULL;
 
 	jtag_add_dr_scan(jtag_info->tap, 3, fields, TAP_IDLE);
-	gettimeofday(&timeout_end, NULL);
-	timeval_add_time(&timeout_end, 0, timeout * 1000);
+
+	int64_t then = timeval_ms() + timeout_ms;
 	do {
 		jtag_add_dr_scan(jtag_info->tap, 3, fields, TAP_IDLE);
 		retval = jtag_execute_queue();
@@ -627,8 +625,7 @@ int embeddedice_handshake(struct arm_jtag *jtag_info, int hsbit, uint32_t timeou
 		if (buf_get_u32(field0_in, hsbit, 1) == hsact)
 			return ERROR_OK;
 
-		gettimeofday(&now, NULL);
-	} while (timeval_compare(&now, &timeout_end) <= 0);
+	} while (timeval_ms() <= then);
 
 	LOG_ERROR("embeddedice handshake timeout");
 	return ERROR_TARGET_TIMEOUT;

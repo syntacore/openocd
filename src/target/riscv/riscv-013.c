@@ -8,7 +8,6 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <time.h>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -64,16 +63,16 @@ static int register_read_direct(struct target *target, riscv_reg_t *value,
 		enum gdb_regno number);
 static int register_write_direct(struct target *target, enum gdb_regno number,
 		riscv_reg_t value);
-static int riscv013_access_memory(struct target *target, const riscv_mem_access_args_t args);
+static int riscv013_access_memory(struct target *target, const struct riscv_mem_access_args args);
 static bool riscv013_get_impebreak(const struct target *target);
 static unsigned int riscv013_get_progbufsize(const struct target *target);
 
-typedef enum {
+enum grouptype {
 	HALT_GROUP,
 	RESUME_GROUP
-} grouptype_t;
+};
 static int set_group(struct target *target, bool *supported, unsigned int group,
-		grouptype_t grouptype);
+		enum grouptype grouptype);
 
 /**
  * Since almost everything can be accomplish by scanning the dbus register, all
@@ -222,7 +221,7 @@ typedef struct {
 	/* We cache the read-only bits of sbcs here. */
 	uint32_t sbcs;
 
-	yes_no_maybe_t progbuf_writable;
+	enum yes_no_maybe progbuf_writable;
 	/* We only need the address so that we know the alignment of the buffer. */
 	riscv_addr_t progbuf_address;
 
@@ -351,15 +350,15 @@ static void riscv013_dm_free(struct target *target)
 	info->dm = NULL;
 }
 
-static riscv_debug_reg_ctx_t get_riscv_debug_reg_ctx(const struct target *target)
+static struct riscv_debug_reg_ctx get_riscv_debug_reg_ctx(const struct target *target)
 {
 	if (!target_was_examined(target)) {
-		const riscv_debug_reg_ctx_t default_context = {0};
+		const struct riscv_debug_reg_ctx default_context = {0};
 		return default_context;
 	}
 
 	RISCV013_INFO(info);
-	const riscv_debug_reg_ctx_t context = {
+	const struct riscv_debug_reg_ctx context = {
 		.XLEN = { .value = riscv_xlen(target), .is_set = true },
 		.DXLEN = { .value = riscv_xlen(target), .is_set = true },
 		.abits = { .value = info->abits, .is_set = true },
@@ -370,9 +369,9 @@ static riscv_debug_reg_ctx_t get_riscv_debug_reg_ctx(const struct target *target
 static void log_debug_reg(struct target *target, enum riscv_debug_reg_ordinal reg,
 		riscv_reg_t value, const char *file, unsigned int line, const char *func)
 {
-	if (debug_level < LOG_LVL_DEBUG)
+	if (!LOG_LEVEL_IS(LOG_LVL_DEBUG))
 		return;
-	const riscv_debug_reg_ctx_t context = get_riscv_debug_reg_ctx(target);
+	const struct riscv_debug_reg_ctx context = get_riscv_debug_reg_ctx(target);
 	char * const buf = malloc(riscv_debug_reg_to_s(NULL, reg, context, value, RISCV_DEBUG_REG_HIDE_UNNAMED_0) + 1);
 	if (!buf) {
 		LOG_ERROR("Unable to allocate memory.");
@@ -449,9 +448,7 @@ static int increase_dmi_busy_delay(struct target *target)
 	if (res != ERROR_OK)
 		return res;
 
-	res = riscv_scan_increase_delay(&info->learned_delays,
-			RISCV_DELAY_BASE);
-	return res;
+	return riscv_scan_increase_delay(&info->learned_delays, RISCV_DELAY_BASE);
 }
 
 static void reset_learned_delays(struct target *target)
@@ -536,7 +533,32 @@ static int dm_write(struct target *target, uint32_t address, uint32_t value)
 	return dmi_write(target, riscv013_get_dmi_address(target, address), value);
 }
 
-static bool check_dbgbase_exists(struct target *target)
+static int activate_dm(struct target *target, uint32_t dm_base_addr)
+{
+	LOG_TARGET_DEBUG(target, "Activating the DM with DMI base address (dbgbase) = 0x%x", dm_base_addr);
+	if (dmi_write(target, DM_DMCONTROL + dm_base_addr, DM_DMCONTROL_DMACTIVE) != ERROR_OK)
+		return ERROR_FAIL;
+
+	int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
+	LOG_TARGET_DEBUG(target, "Waiting for the DM to become active");
+	while (1) {
+		uint32_t dmcontrol;
+		if (dmi_read(target, &dmcontrol, DM_DMCONTROL + dm_base_addr) != ERROR_OK)
+			return ERROR_FAIL;
+		if (get_field32(dmcontrol, DM_DMCONTROL_DMACTIVE))
+			break;
+		if (timeval_ms() > then) {
+			LOG_TARGET_ERROR(target, "Debug Module (at address dbgbase=0x%" PRIx32 ") did not become active in %d s. "
+					"Increase the timeout with 'riscv set_command_timeout_sec'",
+					dm_base_addr, riscv_get_command_timeout_sec());
+			return ERROR_TIMEOUT_REACHED;
+		}
+	}
+	LOG_TARGET_DEBUG(target, "DM has become active");
+	return ERROR_OK;
+}
+
+static int check_dbgbase_exists(struct target *target)
 {
 	uint32_t next_dm = 0;
 	unsigned int count = 1;
@@ -546,7 +568,14 @@ static bool check_dbgbase_exists(struct target *target)
 	while (1) {
 		uint32_t current_dm = next_dm;
 		if (current_dm == target->dbgbase)
-			return true;
+			return ERROR_OK;
+
+		uint32_t dmcontrol;
+		if (dmi_read(target, &dmcontrol, DM_DMCONTROL + current_dm) != ERROR_OK)
+			break;
+		if (!get_field32(dmcontrol, DM_DMCONTROL_DMACTIVE) && activate_dm(target, current_dm) != ERROR_OK)
+			break;
+
 		if (dmi_read(target, &next_dm, DM_NEXTDM + current_dm) != ERROR_OK)
 			break;
 		LOG_TARGET_DEBUG(target, "dm @ 0x%x --> nextdm=0x%x", current_dm, next_dm);
@@ -567,7 +596,7 @@ static bool check_dbgbase_exists(struct target *target)
 			break;
 		}
 	}
-	return false;
+	return ERROR_FAIL;
 }
 
 static int dmstatus_read(struct target *target, uint32_t *dmstatus,
@@ -602,15 +631,15 @@ static int increase_ac_busy_delay(struct target *target)
 static uint32_t __attribute__((unused)) abstract_register_size(unsigned int width)
 {
 	switch (width) {
-		case 32:
-			return set_field(0, AC_ACCESS_REGISTER_AARSIZE, 2);
-		case 64:
-			return set_field(0, AC_ACCESS_REGISTER_AARSIZE, 3);
-		case 128:
-			return set_field(0, AC_ACCESS_REGISTER_AARSIZE, 4);
-		default:
-			LOG_ERROR("Unsupported register width: %d", width);
-			return 0;
+	case 32:
+		return set_field(0, AC_ACCESS_REGISTER_AARSIZE, 2);
+	case 64:
+		return set_field(0, AC_ACCESS_REGISTER_AARSIZE, 3);
+	case 128:
+		return set_field(0, AC_ACCESS_REGISTER_AARSIZE, 4);
+	default:
+		LOG_ERROR("Unsupported register width: %d", width);
+		return 0;
 	}
 }
 
@@ -627,7 +656,7 @@ static int wait_for_idle(struct target *target, uint32_t *abstractcs)
 		return ERROR_FAIL;
 	}
 
-	time_t start = time(NULL);
+	int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
 	do {
 		if (dm_read(target, abstractcs, DM_ABSTRACTCS) != ERROR_OK) {
 			/* We couldn't read abstractcs. For safety, overwrite the output value to
@@ -642,7 +671,7 @@ static int wait_for_idle(struct target *target, uint32_t *abstractcs)
 			dm->abstract_cmd_maybe_busy = false;
 			return ERROR_OK;
 		}
-	} while ((time(NULL) - start) < riscv_get_command_timeout_sec());
+	} while (timeval_ms() < then);
 
 	LOG_TARGET_ERROR(target,
 		"Timed out after %ds waiting for busy to go low (abstractcs=0x%" PRIx32 "). "
@@ -745,14 +774,14 @@ int riscv013_execute_abstract_command(struct target *target, uint32_t command,
 {
 	assert(cmderr);
 	*cmderr = CMDERR_NONE;
-	if (debug_level >= LOG_LVL_DEBUG) {
+	if (LOG_LEVEL_IS(LOG_LVL_DEBUG)) {
 		switch (get_field(command, DM_COMMAND_CMDTYPE)) {
-			case 0:
-				LOG_DEBUG_REG(target, AC_ACCESS_REGISTER, command);
-				break;
-			default:
-				LOG_TARGET_DEBUG(target, "command=0x%x", command);
-				break;
+		case 0:
+			LOG_DEBUG_REG(target, AC_ACCESS_REGISTER, command);
+			break;
+		default:
+			LOG_TARGET_DEBUG(target, "command=0x%x", command);
+			break;
 		}
 	}
 
@@ -864,14 +893,14 @@ static int write_abstract_arg(struct target *target, unsigned int index,
 {
 	unsigned int offset = index * size_bits / 32;
 	switch (size_bits) {
-		default:
-			LOG_TARGET_ERROR(target, "Unsupported size: %d bits", size_bits);
-			return ERROR_FAIL;
-		case 64:
-			dm_write(target, DM_DATA0 + offset + 1, (uint32_t)(value >> 32));
-			/* falls through */
-		case 32:
-			dm_write(target, DM_DATA0 + offset, (uint32_t)value);
+	default:
+		LOG_TARGET_ERROR(target, "Unsupported size: %d bits", size_bits);
+		return ERROR_FAIL;
+	case 64:
+		dm_write(target, DM_DATA0 + offset + 1, (uint32_t)(value >> 32));
+		/* falls through */
+	case 32:
+		dm_write(target, DM_DATA0 + offset, (uint32_t)value);
 	}
 	return ERROR_OK;
 }
@@ -884,16 +913,16 @@ uint32_t riscv013_access_register_command(struct target *target, uint32_t number
 {
 	uint32_t command = set_field(0, DM_COMMAND_CMDTYPE, 0);
 	switch (size) {
-		case 32:
-			command = set_field(command, AC_ACCESS_REGISTER_AARSIZE, 2);
-			break;
-		case 64:
-			command = set_field(command, AC_ACCESS_REGISTER_AARSIZE, 3);
-			break;
-		default:
-			LOG_TARGET_ERROR(target, "%d-bit register %s not supported.",
-					size, riscv_reg_gdb_regno_name(target, number));
-			assert(0);
+	case 32:
+		command = set_field(command, AC_ACCESS_REGISTER_AARSIZE, 2);
+		break;
+	case 64:
+		command = set_field(command, AC_ACCESS_REGISTER_AARSIZE, 3);
+		break;
+	default:
+		LOG_TARGET_ERROR(target, "%d-bit register %s not supported.",
+				size, riscv_reg_gdb_regno_name(target, number));
+		assert(0);
 	}
 
 	if (number <= GDB_REGNO_XPR31) {
@@ -1013,19 +1042,19 @@ cleanup:
 static uint32_t abstract_memory_size(unsigned int width)
 {
 	switch (width) {
-		case 8:
-			return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 0);
-		case 16:
-			return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 1);
-		case 32:
-			return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 2);
-		case 64:
-			return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 3);
-		case 128:
-			return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 4);
-		default:
-			LOG_ERROR("Unsupported memory width: %d", width);
-			return 0;
+	case 8:
+		return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 0);
+	case 16:
+		return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 1);
+	case 32:
+		return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 2);
+	case 64:
+		return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 3);
+	case 128:
+		return set_field(0, AC_ACCESS_MEMORY_AAMSIZE, 4);
+	default:
+		LOG_ERROR("Unsupported memory width: %d", width);
+		return 0;
 	}
 }
 
@@ -1260,38 +1289,38 @@ static int scratch_read64(struct target *target, scratch_mem_t *scratch,
 {
 	uint32_t v;
 	switch (scratch->memory_space) {
-		case SPACE_DM_DATA:
-			if (dm_read(target, &v, DM_DATA0 + scratch->debug_address) != ERROR_OK)
+	case SPACE_DM_DATA:
+		if (dm_read(target, &v, DM_DATA0 + scratch->debug_address) != ERROR_OK)
+			return ERROR_FAIL;
+		*value = v;
+		if (dm_read(target, &v, DM_DATA1 + scratch->debug_address) != ERROR_OK)
+			return ERROR_FAIL;
+		*value |= ((uint64_t)v) << 32;
+		break;
+	case SPACE_DMI_PROGBUF:
+		if (dm_read(target, &v, DM_PROGBUF0 + scratch->debug_address) != ERROR_OK)
+			return ERROR_FAIL;
+		*value = v;
+		if (dm_read(target, &v, DM_PROGBUF1 + scratch->debug_address) != ERROR_OK)
+			return ERROR_FAIL;
+		*value |= ((uint64_t)v) << 32;
+		break;
+	case SPACE_DMI_RAM:
+		{
+			uint8_t buffer[8] = {0};
+			const struct riscv_mem_access_args args = {
+				.address = scratch->debug_address,
+				.read_buffer = buffer,
+				.size = 4,
+				.count = 2,
+				.increment = 4,
+			};
+			if (riscv013_access_memory(target, args) != ERROR_OK)
 				return ERROR_FAIL;
-			*value = v;
-			if (dm_read(target, &v, DM_DATA1 + scratch->debug_address) != ERROR_OK)
-				return ERROR_FAIL;
-			*value |= ((uint64_t) v) << 32;
-			break;
-		case SPACE_DMI_PROGBUF:
-			if (dm_read(target, &v, DM_PROGBUF0 + scratch->debug_address) != ERROR_OK)
-				return ERROR_FAIL;
-			*value = v;
-			if (dm_read(target, &v, DM_PROGBUF1 + scratch->debug_address) != ERROR_OK)
-				return ERROR_FAIL;
-			*value |= ((uint64_t) v) << 32;
-			break;
-		case SPACE_DMI_RAM:
-			{
-				uint8_t buffer[8] = {0};
-				const riscv_mem_access_args_t args = {
-					.address = scratch->debug_address,
-					.read_buffer = buffer,
-					.size = 4,
-					.count = 2,
-					.increment = 4,
-				};
-				if (riscv013_access_memory(target, args) != ERROR_OK)
-					return ERROR_FAIL;
-				*value = buf_get_u64(buffer,
-						/* first = */ 0, /* bit_num = */ 64);
-			}
-			break;
+			*value = buf_get_u64(buffer,
+					/* first = */ 0, /* bit_num = */ 64);
+		}
+		break;
 	}
 	return ERROR_OK;
 }
@@ -1300,38 +1329,38 @@ static int scratch_write64(struct target *target, scratch_mem_t *scratch,
 		uint64_t value)
 {
 	switch (scratch->memory_space) {
-		case SPACE_DM_DATA:
-			dm_write(target, DM_DATA0 + scratch->debug_address, (uint32_t)value);
-			dm_write(target, DM_DATA1 + scratch->debug_address, (uint32_t)(value >> 32));
-			break;
-		case SPACE_DMI_PROGBUF:
-			dm_write(target, DM_PROGBUF0 + scratch->debug_address, (uint32_t)value);
-			dm_write(target, DM_PROGBUF1 + scratch->debug_address, (uint32_t)(value >> 32));
-			riscv013_invalidate_cached_progbuf(target);
-			break;
-		case SPACE_DMI_RAM:
-			{
-				uint8_t buffer[8] = {
-					value,
-					value >> 8,
-					value >> 16,
-					value >> 24,
-					value >> 32,
-					value >> 40,
-					value >> 48,
-					value >> 56
-				};
-				const riscv_mem_access_args_t args = {
-					.address = scratch->debug_address,
-					.write_buffer = buffer,
-					.size = 4,
-					.count = 2,
-					.increment = 4,
-				};
-				if (riscv013_access_memory(target, args) != ERROR_OK)
-					return ERROR_FAIL;
-			}
-			break;
+	case SPACE_DM_DATA:
+		dm_write(target, DM_DATA0 + scratch->debug_address, (uint32_t)value);
+		dm_write(target, DM_DATA1 + scratch->debug_address, (uint32_t)(value >> 32));
+		break;
+	case SPACE_DMI_PROGBUF:
+		dm_write(target, DM_PROGBUF0 + scratch->debug_address, (uint32_t)value);
+		dm_write(target, DM_PROGBUF1 + scratch->debug_address, (uint32_t)(value >> 32));
+		riscv013_invalidate_cached_progbuf(target);
+		break;
+	case SPACE_DMI_RAM:
+		{
+			uint8_t buffer[8] = {
+				value,
+				value >> 8,
+				value >> 16,
+				value >> 24,
+				value >> 32,
+				value >> 40,
+				value >> 48,
+				value >> 56
+			};
+			const struct riscv_mem_access_args args = {
+				.address = scratch->debug_address,
+				.write_buffer = buffer,
+				.size = 4,
+				.count = 2,
+				.increment = 4,
+			};
+			if (riscv013_access_memory(target, args) != ERROR_OK)
+				return ERROR_FAIL;
+		}
+		break;
 	}
 	return ERROR_OK;
 }
@@ -1443,13 +1472,31 @@ static int register_read_progbuf(struct target *target, uint64_t *value,
 {
 	assert(target->state == TARGET_HALTED);
 
-	if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31)
-		return fpr_read_progbuf(target, value, number);
-	else if (number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095)
-		return csr_read_progbuf(target, value, number);
+	int res;
+	uint64_t new_value;
+	if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31) {
+		res = fpr_read_progbuf(target, &new_value, number);
+	} else if (number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095) {
+		res = csr_read_progbuf(target, &new_value, number);
+	} else {
+		LOG_TARGET_ERROR(target, "Unexpected read of %s via program buffer.",
+				riscv_reg_gdb_regno_name(target, number));
+		return ERROR_FAIL;
+	}
+	if (res != ERROR_OK)
+		return res;
 
-	LOG_TARGET_ERROR(target, "Unexpected read of %s via program buffer.",
-			riscv_reg_gdb_regno_name(target, number));
+	unsigned int size_bits = register_size(target, number);
+	unsigned int value_bits = sizeof(*value) * CHAR_BIT;
+	assert(size_bits <= value_bits);
+	if (size_bits == value_bits || new_value >> size_bits == 0) {
+		*value = new_value;
+		return ERROR_OK;
+	}
+	LOG_TARGET_ERROR(target, "Value 0x%" PRIx64 " read from register %s"
+			" exceeds the size of the register (%u bits). This is a HW bug."
+			" Discarding the value", new_value,
+			riscv_reg_gdb_regno_name(target, number), size_bits);
 	return ERROR_FAIL;
 }
 
@@ -1662,7 +1709,7 @@ static int register_read_direct(struct target *target, riscv_reg_t *value,
 
 static int wait_for_authbusy(struct target *target, uint32_t *dmstatus)
 {
-	time_t start = time(NULL);
+	int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
 	while (1) {
 		uint32_t value;
 		if (dmstatus_read(target, &value, false) != ERROR_OK)
@@ -1671,7 +1718,7 @@ static int wait_for_authbusy(struct target *target, uint32_t *dmstatus)
 			*dmstatus = value;
 		if (!get_field(value, DM_DMSTATUS_AUTHBUSY))
 			break;
-		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
+		if (timeval_ms() > then) {
 			LOG_TARGET_ERROR(target, "Timed out after %ds waiting for authbusy to go low (dmstatus=0x%x). "
 					"Increase the timeout with riscv set_command_timeout_sec.",
 					riscv_get_command_timeout_sec(),
@@ -1794,7 +1841,7 @@ static void deinit_target(struct target *target)
 }
 
 static int set_group(struct target *target, bool *supported, unsigned int group,
-		grouptype_t grouptype)
+		enum grouptype grouptype)
 {
 	uint32_t write_val = DM_DMCS2_HGWRITE;
 	assert(group <= 31);
@@ -1861,14 +1908,14 @@ static int reset_dm(struct target *target)
 		if (result != ERROR_OK)
 			return result;
 
-		const time_t start = time(NULL);
+		int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
 		LOG_TARGET_DEBUG(target, "Waiting for the DM to acknowledge reset.");
 		do {
 			result = dm_read(target, &dmcontrol, DM_DMCONTROL);
 			if (result != ERROR_OK)
 				return result;
 
-			if (time(NULL) - start > riscv_get_command_timeout_sec()) {
+			if (timeval_ms() > then) {
 				LOG_TARGET_ERROR(target, "DM didn't acknowledge reset in %d s. "
 						"Increase the timeout with 'riscv set_command_timeout_sec'.",
 						riscv_get_command_timeout_sec());
@@ -1877,26 +1924,12 @@ static int reset_dm(struct target *target)
 		} while (get_field32(dmcontrol, DM_DMCONTROL_DMACTIVE));
 		LOG_TARGET_DEBUG(target, "DM reset initiated.");
 	}
+	/* TODO: Move the code above into `deactivate_dm()` function
+	 * (a logical counterpart to activate_dm()). */
 
-	LOG_TARGET_DEBUG(target, "Activating the DM.");
-	result = dm_write(target, DM_DMCONTROL, DM_DMCONTROL_DMACTIVE);
+	result = activate_dm(target, dm->base);
 	if (result != ERROR_OK)
 		return result;
-
-	const time_t start = time(NULL);
-	LOG_TARGET_DEBUG(target, "Waiting for the DM to come out of reset.");
-	do {
-		result = dm_read(target, &dmcontrol, DM_DMCONTROL);
-		if (result != ERROR_OK)
-			return result;
-
-		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
-			LOG_TARGET_ERROR(target, "Debug Module did not become active in %d s. "
-					"Increase the timeout with 'riscv set_command_timeout_sec'.",
-					riscv_get_command_timeout_sec());
-			return ERROR_TIMEOUT_REACHED;
-		}
-	} while (!get_field32(dmcontrol, DM_DMCONTROL_DMACTIVE));
 
 	LOG_TARGET_DEBUG(target, "DM successfully reset.");
 	dm->was_reset = true;
@@ -2052,7 +2085,7 @@ static int examine(struct target *target)
 			info->abits, RISCV013_DTMCS_ABITS_MIN);
 	}
 
-	if (!check_dbgbase_exists(target)) {
+	if (check_dbgbase_exists(target) != ERROR_OK) {
 		LOG_TARGET_ERROR(target, "Could not find debug module with DMI base address (dbgbase) = 0x%x", target->dbgbase);
 		return ERROR_FAIL;
 	}
@@ -2117,6 +2150,12 @@ static int examine(struct target *target)
 	enum riscv_hart_state state_at_examine_start;
 	if (riscv_get_hart_state(target, &state_at_examine_start) != ERROR_OK)
 		return ERROR_FAIL;
+
+	if (state_at_examine_start == RISCV_STATE_UNAVAILABLE) {
+		target->state = TARGET_UNAVAILABLE;
+		LOG_TARGET_INFO(target, "unavailable.");
+		return ERROR_FAIL;
+	}
 
 	RISCV_INFO(r);
 	const bool hart_halted_at_examine_start = state_at_examine_start == RISCV_STATE_HALTED;
@@ -2221,7 +2260,7 @@ static unsigned int riscv013_data_bits(struct target *target)
 	RISCV_INFO(r);
 
 	for (unsigned int i = 0; i < r->num_enabled_mem_access_methods; i++) {
-		riscv_mem_access_method_t method = r->mem_access_methods[i];
+		enum riscv_mem_access_method method = r->mem_access_methods[i];
 
 		if (method == RISCV_MEM_ACCESS_PROGBUF) {
 			if (has_sufficient_progbuf(target, 3))
@@ -2327,7 +2366,7 @@ static int prep_for_vector_access(struct target *target,
 	if (target->state != TARGET_HALTED) {
 		LOG_TARGET_ERROR(target,
 				"Unable to access vector register: target not halted");
-		return ERROR_FAIL;
+		return ERROR_TARGET_NOT_HALTED;
 	}
 	if (prep_for_register_access(target, orig_mstatus, GDB_REGNO_VL) != ERROR_OK)
 		return ERROR_FAIL;
@@ -2460,16 +2499,16 @@ int riscv013_set_register_buf(struct target *target, enum gdb_regno regno,
 static uint32_t sb_sbaccess(unsigned int size_bytes)
 {
 	switch (size_bytes) {
-		case 1:
-			return set_field(0, DM_SBCS_SBACCESS, 0);
-		case 2:
-			return set_field(0, DM_SBCS_SBACCESS, 1);
-		case 4:
-			return set_field(0, DM_SBCS_SBACCESS, 2);
-		case 8:
-			return set_field(0, DM_SBCS_SBACCESS, 3);
-		case 16:
-			return set_field(0, DM_SBCS_SBACCESS, 4);
+	case 1:
+		return set_field(0, DM_SBCS_SBACCESS, 0);
+	case 2:
+		return set_field(0, DM_SBCS_SBACCESS, 1);
+	case 4:
+		return set_field(0, DM_SBCS_SBACCESS, 2);
+	case 8:
+		return set_field(0, DM_SBCS_SBACCESS, 3);
+	case 16:
+		return set_field(0, DM_SBCS_SBACCESS, 4);
 	}
 	assert(0);
 	return 0;
@@ -2544,7 +2583,7 @@ static int batch_run_timeout(struct target *target, struct riscv_batch *batch)
 	riscv_batch_add_nop(batch);
 
 	size_t finished_scans = 0;
-	const time_t start = time(NULL);
+	int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
 	const unsigned int old_base_delay = riscv_scan_get_delay(&info->learned_delays,
 			RISCV_DELAY_BASE);
 	int result;
@@ -2567,7 +2606,7 @@ static int batch_run_timeout(struct target *target, struct riscv_batch *batch)
 		result = increase_dmi_busy_delay(target);
 		if (result != ERROR_OK)
 			return result;
-	} while (time(NULL) - start < riscv_get_command_timeout_sec());
+	} while (timeval_ms() < then);
 
 	assert(result == ERROR_OK);
 	assert(riscv_batch_was_batch_busy(batch));
@@ -2590,18 +2629,18 @@ static int sba_supports_access(struct target *target, unsigned int size_bytes)
 {
 	RISCV013_INFO(info);
 	switch (size_bytes) {
-		case 1:
-			return get_field(info->sbcs, DM_SBCS_SBACCESS8);
-		case 2:
-			return get_field(info->sbcs, DM_SBCS_SBACCESS16);
-		case 4:
-			return get_field(info->sbcs, DM_SBCS_SBACCESS32);
-		case 8:
-			return get_field(info->sbcs, DM_SBCS_SBACCESS64);
-		case 16:
-			return get_field(info->sbcs, DM_SBCS_SBACCESS128);
-		default:
-			return 0;
+	case 1:
+		return get_field(info->sbcs, DM_SBCS_SBACCESS8);
+	case 2:
+		return get_field(info->sbcs, DM_SBCS_SBACCESS16);
+	case 4:
+		return get_field(info->sbcs, DM_SBCS_SBACCESS32);
+	case 8:
+		return get_field(info->sbcs, DM_SBCS_SBACCESS64);
+	case 16:
+		return get_field(info->sbcs, DM_SBCS_SBACCESS128);
+	default:
+		return 0;
 	}
 }
 
@@ -2987,14 +3026,14 @@ static int deassert_reset(struct target *target)
 	uint32_t dmstatus;
 	const unsigned int orig_base_delay = riscv_scan_get_delay(&info->learned_delays,
 			RISCV_DELAY_BASE);
-	time_t start = time(NULL);
+	int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
 	LOG_TARGET_DEBUG(target, "Waiting for hart to come out of reset.");
 	do {
 		result = dmstatus_read(target, &dmstatus, true);
 		if (result != ERROR_OK)
 			return result;
 
-		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
+		if (timeval_ms() > then) {
 			LOG_TARGET_ERROR(target, "Hart didn't leave reset in %ds; "
 					"dmstatus=0x%x (allunavail=%s, allhavereset=%s); "
 					"Increase the timeout with riscv set_command_timeout_sec.",
@@ -3003,15 +3042,7 @@ static int deassert_reset(struct target *target)
 					get_field(dmstatus, DM_DMSTATUS_ALLHAVERESET) ? "true" : "false");
 			return ERROR_TIMEOUT_REACHED;
 		}
-		/* Certain debug modules, like the one in GD32VF103
-		 * MCUs, violate the specification's requirement that
-		 * each hart is in "exactly one of four states" and,
-		 * during reset, report harts as both unavailable and
-		 * halted/running. To work around this, we check for
-		 * the absence of the unavailable state rather than
-		 * the presence of any other state. */
-	} while (get_field(dmstatus, DM_DMSTATUS_ALLUNAVAIL) &&
-			!get_field(dmstatus, DM_DMSTATUS_ALLHAVERESET));
+	} while (!get_field(dmstatus, DM_DMSTATUS_ALLHAVERESET));
 
 	riscv_scan_set_delay(&info->learned_delays, RISCV_DELAY_BASE,
 			orig_base_delay);
@@ -3103,7 +3134,7 @@ static int execute_autofence(struct target *target)
 static void log_memory_access128(target_addr_t address, uint64_t value_h,
 		uint64_t value_l, bool is_read)
 {
-	if (debug_level < LOG_LVL_DEBUG)
+	if (!LOG_LEVEL_IS(LOG_LVL_DEBUG))
 		return;
 
 	char fmt[80];
@@ -3115,26 +3146,26 @@ static void log_memory_access128(target_addr_t address, uint64_t value_h,
 static void log_memory_access64(target_addr_t address, uint64_t value,
 		unsigned int size_bytes, bool is_read)
 {
-	if (debug_level < LOG_LVL_DEBUG)
+	if (!LOG_LEVEL_IS(LOG_LVL_DEBUG))
 		return;
 
 	char fmt[80];
 	sprintf(fmt, "M[0x%" TARGET_PRIxADDR "] %ss 0x%%0%d" PRIx64,
 			address, is_read ? "read" : "write", size_bytes * 2);
 	switch (size_bytes) {
-		case 1:
-			value &= 0xff;
-			break;
-		case 2:
-			value &= 0xffff;
-			break;
-		case 4:
-			value &= 0xffffffffUL;
-			break;
-		case 8:
-			break;
-		default:
-			assert(false);
+	case 1:
+		value &= 0xff;
+		break;
+	case 2:
+		value &= 0xffff;
+		break;
+	case 4:
+		value &= 0xffffffffUL;
+		break;
+	case 8:
+		break;
+	default:
+		assert(false);
 	}
 	LOG_DEBUG(fmt, value);
 }
@@ -3188,13 +3219,13 @@ static target_addr_t sb_read_address(struct target *target)
 
 static int read_sbcs_nonbusy(struct target *target, uint32_t *sbcs)
 {
-	time_t start = time(NULL);
+	int64_t then = timeval_ms() + 1000 * riscv_get_command_timeout_sec();
 	while (1) {
 		if (dm_read(target, sbcs, DM_SBCS) != ERROR_OK)
 			return ERROR_FAIL;
 		if (!get_field(*sbcs, DM_SBCS_SBBUSY))
 			return ERROR_OK;
-		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
+		if (timeval_ms() > then) {
 			LOG_TARGET_ERROR(target, "Timed out after %ds waiting for sbbusy to go low (sbcs=0x%x). "
 					"Increase the timeout with riscv set_command_timeout_sec.",
 					riscv_get_command_timeout_sec(), *sbcs);
@@ -3269,7 +3300,7 @@ static int restore_privilege_from_virt2phys_mode(struct target *target, riscv_re
 	return ERROR_OK;
 }
 
-static int read_memory_bus_v0(struct target *target, const riscv_mem_access_args_t args)
+static int read_memory_bus_v0(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -3359,7 +3390,7 @@ static int read_memory_bus_v0(struct target *target, const riscv_mem_access_args
 /**
  * Read the requested memory using the system bus interface.
  */
-static int read_memory_bus_v1(struct target *target, const riscv_mem_access_args_t args)
+static int read_memory_bus_v1(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -3505,7 +3536,8 @@ static int read_memory_bus_v1(struct target *target, const riscv_mem_access_args
 	return ERROR_OK;
 }
 
-static void log_mem_access_result(struct target *target, bool success, riscv_mem_access_method_t method, bool is_read)
+static void log_mem_access_result(struct target *target, bool success,
+		enum riscv_mem_access_method method, bool is_read)
 {
 	RISCV_INFO(r);
 	bool warn = false;
@@ -3676,7 +3708,7 @@ static struct mem_access_result mem_access_result(enum mem_access_result_enum va
 }
 
 static struct mem_access_result mem_should_skip_progbuf(struct target *target,
-	const riscv_mem_access_args_t args)
+	const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 	const char *const access_type =
@@ -3719,7 +3751,7 @@ static struct mem_access_result mem_should_skip_progbuf(struct target *target,
 }
 
 static struct mem_access_result
-mem_should_skip_sysbus(struct target *target, const riscv_mem_access_args_t args)
+mem_should_skip_sysbus(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 
@@ -3752,7 +3784,7 @@ mem_should_skip_sysbus(struct target *target, const riscv_mem_access_args_t args
 }
 
 static struct mem_access_result
-mem_should_skip_abstract(struct target *target, const riscv_mem_access_args_t args)
+mem_should_skip_abstract(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 
@@ -3787,7 +3819,7 @@ mem_should_skip_abstract(struct target *target, const riscv_mem_access_args_t ar
  * aamsize fields in the memory access abstract command.
  */
 static struct mem_access_result
-read_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
+read_memory_abstract(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -3864,7 +3896,7 @@ read_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
  * byte aamsize fields in the memory access abstract command.
  */
 static struct mem_access_result
-write_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
+write_memory_abstract(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_write(args));
 
@@ -4015,7 +4047,7 @@ clear_abstractauto_and_fail:
  */
 static int read_memory_progbuf_inner_on_ac_busy(struct target *target,
 		uint32_t start_index, uint32_t *elements_read,
-		const riscv_mem_access_args_t args)
+		const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4074,7 +4106,7 @@ static int read_memory_progbuf_inner_on_ac_busy(struct target *target,
  */
 static int read_memory_progbuf_inner_on_dmi_busy(struct target *target,
 		uint32_t start_index, uint32_t next_start_index,
-		const riscv_mem_access_args_t args)
+		const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4095,7 +4127,7 @@ static int read_memory_progbuf_inner_on_dmi_busy(struct target *target,
 static int read_memory_progbuf_inner_extract_batch_data(struct target *target,
 		const struct riscv_batch *batch,
 		uint32_t start_index, uint32_t elements_to_read, uint32_t *elements_read,
-		const riscv_mem_access_args_t args)
+		const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4152,7 +4184,7 @@ static int read_memory_progbuf_inner_extract_batch_data(struct target *target,
  * - DM_ABSTRACTAUTO_AUTOEXECDATA is set.
  */
 static int read_memory_progbuf_inner_run_and_process_batch(struct target *target,
-		struct riscv_batch *batch, const riscv_mem_access_args_t args,
+		struct riscv_batch *batch, const struct riscv_mem_access_args args,
 		uint32_t start_index, uint32_t elements_to_read, uint32_t *elements_read)
 {
 	assert(riscv_mem_access_is_read(args));
@@ -4223,7 +4255,7 @@ static uint32_t read_memory_progbuf_inner_fill_batch(struct riscv_batch *batch,
 }
 
 static int read_memory_progbuf_inner_try_to_read(struct target *target,
-		const riscv_mem_access_args_t args, uint32_t *elements_read,
+		const struct riscv_mem_access_args args, uint32_t *elements_read,
 		uint32_t index, uint32_t loop_count)
 {
 	assert(riscv_mem_access_is_read(args));
@@ -4246,7 +4278,7 @@ static int read_memory_progbuf_inner_try_to_read(struct target *target,
  * with the address argument equal to curr_target_address.
  */
 static int read_memory_progbuf_inner_ensure_forward_progress(struct target *target,
-		const riscv_mem_access_args_t args, uint32_t start_index)
+		const struct riscv_mem_access_args args, uint32_t start_index)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4257,7 +4289,7 @@ static int read_memory_progbuf_inner_ensure_forward_progress(struct target *targ
 		start_index * args.increment;
 	uint8_t * const curr_buffer_address = args.read_buffer +
 		start_index * args.size;
-	const riscv_mem_access_args_t curr_access = {
+	const struct riscv_mem_access_args curr_access = {
 		.read_buffer = curr_buffer_address,
 		.address = curr_target_address,
 		.size = args.size,
@@ -4279,7 +4311,7 @@ static int read_memory_progbuf_inner_ensure_forward_progress(struct target *targ
 	return ERROR_OK;
 }
 
-static void set_buffer_and_log_read(const riscv_mem_access_args_t args,
+static void set_buffer_and_log_read(const struct riscv_mem_access_args args,
 		uint32_t index, uint64_t value)
 {
 	assert(riscv_mem_access_is_read(args));
@@ -4296,7 +4328,7 @@ static void set_buffer_and_log_read(const riscv_mem_access_args_t args,
 }
 
 static int read_word_from_dm_data_regs(struct target *target,
-		const riscv_mem_access_args_t args, uint32_t index)
+		const struct riscv_mem_access_args args, uint32_t index)
 {
 	assert(args.size <= 8);
 	uint64_t value;
@@ -4308,7 +4340,7 @@ static int read_word_from_dm_data_regs(struct target *target,
 }
 
 static struct mem_access_result read_word_from_s1(struct target *target,
-		const riscv_mem_access_args_t args, uint32_t index)
+		const struct riscv_mem_access_args args, uint32_t index)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4361,7 +4393,7 @@ static int read_memory_progbuf_inner_fill_progbuf(struct target *target,
  * is encountered in the process.
  */
 static struct mem_access_result
-read_memory_progbuf_inner(struct target *target, const riscv_mem_access_args_t args)
+read_memory_progbuf_inner(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 	assert(args.count > 1 && "If count == 1, read_memory_progbuf_inner_one must be called");
@@ -4419,7 +4451,7 @@ read_memory_progbuf_inner(struct target *target, const riscv_mem_access_args_t a
  * program doesn't need to increment.
  */
 static struct mem_access_result
-read_memory_progbuf_inner_one(struct target *target, const riscv_mem_access_args_t args)
+read_memory_progbuf_inner_one(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4455,7 +4487,7 @@ read_memory_progbuf_inner_one(struct target *target, const riscv_mem_access_args
  * Read the requested memory, silently handling memory access errors.
  */
 static struct mem_access_result
-read_memory_progbuf(struct target *target, const riscv_mem_access_args_t args)
+read_memory_progbuf(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_read(args));
 
@@ -4471,10 +4503,10 @@ read_memory_progbuf(struct target *target, const riscv_mem_access_args_t args)
 }
 
 static struct mem_access_result
-write_memory_progbuf(struct target *target, const riscv_mem_access_args_t args);
+write_memory_progbuf(struct target *target, const struct riscv_mem_access_args args);
 
 static struct mem_access_result
-access_memory_progbuf(struct target *target, const riscv_mem_access_args_t args)
+access_memory_progbuf(struct target *target, const struct riscv_mem_access_args args)
 {
 	struct mem_access_result skip_reason = mem_should_skip_progbuf(target, args);
 	if (!is_mem_access_ok(skip_reason))
@@ -4509,12 +4541,12 @@ access_memory_progbuf(struct target *target, const riscv_mem_access_args_t args)
 }
 
 static int
-write_memory_bus_v0(struct target *target, const riscv_mem_access_args_t args);
+write_memory_bus_v0(struct target *target, const struct riscv_mem_access_args args);
 static int
-write_memory_bus_v1(struct target *target, const riscv_mem_access_args_t args);
+write_memory_bus_v1(struct target *target, const struct riscv_mem_access_args args);
 
 static struct mem_access_result
-access_memory_sysbus(struct target *target, const riscv_mem_access_args_t args)
+access_memory_sysbus(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 
@@ -4542,7 +4574,7 @@ access_memory_sysbus(struct target *target, const riscv_mem_access_args_t args)
 }
 
 static struct mem_access_result
-access_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
+access_memory_abstract(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 
@@ -4561,7 +4593,7 @@ access_memory_abstract(struct target *target, const riscv_mem_access_args_t args
 }
 
 static int
-riscv013_access_memory(struct target *target, const riscv_mem_access_args_t args)
+riscv013_access_memory(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 
@@ -4586,21 +4618,21 @@ riscv013_access_memory(struct target *target, const riscv_mem_access_args_t args
 
 	RISCV_INFO(r);
 	for (unsigned int i = 0; i < r->num_enabled_mem_access_methods; ++i) {
-		riscv_mem_access_method_t method = r->mem_access_methods[i];
+		enum riscv_mem_access_method method = r->mem_access_methods[i];
 		switch (method) {
-			case RISCV_MEM_ACCESS_PROGBUF:
-				skip_reason[method] = access_memory_progbuf(target, args);
-				break;
-			case RISCV_MEM_ACCESS_SYSBUS:
-				skip_reason[method] = access_memory_sysbus(target, args);
-				break;
-			case RISCV_MEM_ACCESS_ABSTRACT:
-				skip_reason[method] = access_memory_abstract(target, args);
-				break;
-			default:
-				LOG_TARGET_ERROR(target, "Unknown memory access method: %d", method);
-				assert(false && "Unknown memory access method");
-				goto failure;
+		case RISCV_MEM_ACCESS_PROGBUF:
+			skip_reason[method] = access_memory_progbuf(target, args);
+			break;
+		case RISCV_MEM_ACCESS_SYSBUS:
+			skip_reason[method] = access_memory_sysbus(target, args);
+			break;
+		case RISCV_MEM_ACCESS_ABSTRACT:
+			skip_reason[method] = access_memory_abstract(target, args);
+			break;
+		default:
+			LOG_TARGET_ERROR(target, "Unknown memory access method: %d", method);
+			assert(false && "Unknown memory access method");
+			goto failure;
 		}
 
 		if (is_mem_access_failed(skip_reason[method]))
@@ -4621,7 +4653,7 @@ failure:
 	return ERROR_FAIL;
 }
 
-static int write_memory_bus_v0(struct target *target, const riscv_mem_access_args_t args)
+static int write_memory_bus_v0(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_write(args));
 
@@ -4675,7 +4707,7 @@ static int write_memory_bus_v0(struct target *target, const riscv_mem_access_arg
 	return ERROR_OK;
 }
 
-static int write_memory_bus_v1(struct target *target, const riscv_mem_access_args_t args)
+static int write_memory_bus_v1(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_write(args));
 
@@ -4876,7 +4908,8 @@ static int write_memory_progbuf_teardown(struct target *target)
  * failed write.
  */
 static int write_memory_progbuf_handle_busy(struct target *target,
-		target_addr_t *address_p, uint32_t size, const uint8_t *buffer)
+		target_addr_t *address_p, target_addr_t end_address, uint32_t size,
+		const uint8_t *buffer)
 {
 	int res = riscv013_clear_abstract_error(target);
 	if (res != ERROR_OK)
@@ -4892,8 +4925,12 @@ static int write_memory_progbuf_handle_busy(struct target *target,
 	if (register_read_direct(target, &address_on_target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 	const uint8_t * const curr_buff = buffer + (address_on_target - *address_p);
-	LOG_TARGET_DEBUG(target, "Restarting from 0x%" TARGET_PRIxADDR, *address_p);
 	*address_p = address_on_target;
+	if (*address_p == end_address) {
+		LOG_TARGET_DEBUG(target, "Got busy while reading after reading the last element");
+		return ERROR_OK;
+	}
+	LOG_TARGET_DEBUG(target, "Restarting from 0x%" TARGET_PRIxADDR, *address_p);
 	/* This restores the pipeline and ensures one item gets reliably written */
 	return write_memory_progbuf_startup(target, address_p, curr_buff, size);
 }
@@ -4971,7 +5008,8 @@ static int write_memory_progbuf_run_batch(struct target *target, struct riscv_ba
 		/* TODO: If dmi busy is encountered, the address of the last
 		 * successful write can be deduced by analysing the batch.
 		 */
-		return write_memory_progbuf_handle_busy(target, address_p, size, buffer);
+		return write_memory_progbuf_handle_busy(target, address_p, end_address,
+				size, buffer);
 	}
 	LOG_TARGET_ERROR(target, "Error when writing memory, abstractcs=0x%" PRIx32,
 			abstractcs);
@@ -5020,7 +5058,7 @@ static int write_memory_progbuf_fill_progbuf(struct target *target, uint32_t siz
 
 static struct mem_access_result
 write_memory_progbuf_inner(struct target *target,
-		const riscv_mem_access_args_t args)
+		const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_write(args));
 
@@ -5055,7 +5093,7 @@ write_memory_progbuf_inner(struct target *target,
 }
 
 static struct mem_access_result
-write_memory_progbuf(struct target *target, const riscv_mem_access_args_t args)
+write_memory_progbuf(struct target *target, const struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_write(args));
 
@@ -5079,10 +5117,6 @@ static unsigned int riscv013_get_progbufsize(const struct target *target)
 	return r->progbufsize;
 }
 
-static int arch_state(struct target *target)
-{
-	return ERROR_OK;
-}
 
 struct target_type riscv013_target = {
 	.name = "riscv",
@@ -5097,8 +5131,6 @@ struct target_type riscv013_target = {
 
 	.assert_reset = assert_reset,
 	.deassert_reset = deassert_reset,
-
-	.arch_state = arch_state
 };
 
 /*** 0.13-specific implementations of various RISC-V helper functions. ***/
@@ -5425,6 +5457,8 @@ static int riscv013_invalidate_cached_progbuf(struct target *target)
 
 static int riscv013_execute_progbuf(struct target *target, uint32_t *cmderr)
 {
+	if (dm013_select_target(target) != ERROR_OK)
+		return ERROR_FAIL;
 	uint32_t run_program = 0;
 	run_program = set_field(run_program, AC_ACCESS_REGISTER_AARSIZE, 2);
 	run_program = set_field(run_program, AC_ACCESS_REGISTER_POSTEXEC, 1);
@@ -5484,7 +5518,7 @@ static int riscv013_step_or_resume_current_hart(struct target *target,
 {
 	if (target->state != TARGET_HALTED) {
 		LOG_TARGET_ERROR(target, "Hart is not halted!");
-		return ERROR_FAIL;
+		return ERROR_TARGET_NOT_HALTED;
 	}
 
 	LOG_TARGET_DEBUG(target, "resuming (operation=%s)",

@@ -80,8 +80,13 @@ struct command_invocation {
 	unsigned int argc;
 	const char **argv;
 	Jim_Obj * const *jimtcl_argv;
-	Jim_Obj *output;
+	char *output;
 };
+
+/**
+ * Assigned to command_invocation::output on allocation error
+ */
+#define CMD_PRINT_OOM ((char *)(-1L))
 
 /**
  * Return true if the command @c cmd is registered by OpenOCD.
@@ -197,7 +202,6 @@ typedef __COMMAND_HANDLER((*command_handler_t));
 struct command {
 	char *name;
 	command_handler_t handler;
-	Jim_CmdProc *jim_handler;
 	void *jim_handler_data;
 		/* Command handlers can use it for any handler specific data */
 	struct target *jim_override_target;
@@ -234,7 +238,6 @@ static inline struct command *jim_to_command(Jim_Interp *interp)
 struct command_registration {
 	const char *name;
 	command_handler_t handler;
-	Jim_CmdProc *jim_handler;
 	enum command_mode mode;
 	const char *help;
 	/** a string listing the options and arguments, required or optional */

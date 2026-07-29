@@ -192,7 +192,7 @@ COMMAND_HANDLER(handle_flash_erase_check_command)
 		command_print(CMD, "successfully checked erase state");
 	else {
 		command_print(CMD,
-			"unknown error when checking erase state of flash bank #%s at "
+			"Error: checking erase state of flash bank #%s at "
 			TARGET_ADDR_FMT,
 			CMD_ARGV[0],
 			p->base);
@@ -275,7 +275,7 @@ COMMAND_HANDLER(handle_flash_erase_address_command)
 	if (retval == ERROR_OK)
 		retval = flash_erase_address_range(target, do_pad, address, length);
 
-	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
+	if (retval == ERROR_OK && duration_measure(&bench) == ERROR_OK) {
 		command_print(CMD, "erased address " TARGET_ADDR_FMT " (length %" PRIu32 ")"
 			" in %fs (%0.3f KiB/s)", address, length,
 			duration_elapsed(&bench), duration_kbps(&bench, length));
@@ -323,7 +323,7 @@ COMMAND_HANDLER(handle_flash_erase_command)
 
 	retval = flash_driver_erase(p, first, last);
 
-	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
+	if (retval == ERROR_OK && duration_measure(&bench) == ERROR_OK) {
 		command_print(CMD, "erased sectors %" PRIu32 " "
 			"through %" PRIu32 " on flash bank %u "
 			"in %fs", first, last, p->bank_number, duration_elapsed(&bench));
@@ -449,7 +449,7 @@ COMMAND_HANDLER(handle_flash_write_image_command)
 		return retval;
 	}
 
-	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
+	if (retval == ERROR_OK && duration_measure(&bench) == ERROR_OK) {
 		command_print(CMD, "wrote %" PRIu32 " bytes from file %s "
 			"in %fs (%0.3f KiB/s)", written, CMD_ARGV[0],
 			duration_elapsed(&bench), duration_kbps(&bench, written));
@@ -501,7 +501,7 @@ COMMAND_HANDLER(handle_flash_verify_image_command)
 		return retval;
 	}
 
-	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
+	if (retval == ERROR_OK && duration_measure(&bench) == ERROR_OK) {
 		command_print(CMD, "verified %" PRIu32 " bytes from file %s "
 			"in %fs (%0.3f KiB/s)", verified, CMD_ARGV[0],
 			duration_elapsed(&bench), duration_kbps(&bench, verified));
@@ -535,20 +535,20 @@ COMMAND_HANDLER(handle_flash_fill_command)
 		return retval;
 
 	switch (CMD_NAME[4]) {
-		case 'd':
-			wordsize = 8;
-			break;
-		case 'w':
-			wordsize = 4;
-			break;
-		case 'h':
-			wordsize = 2;
-			break;
-		case 'b':
-			wordsize = 1;
-			break;
-		default:
-			return ERROR_COMMAND_SYNTAX_ERROR;
+	case 'd':
+		wordsize = 8;
+		break;
+	case 'w':
+		wordsize = 4;
+		break;
+	case 'h':
+		wordsize = 2;
+		break;
+	case 'b':
+		wordsize = 1;
+		break;
+	default:
+		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
 	if ((wordsize < sizeof(pattern)) && (pattern >> (8 * wordsize) != 0)) {
@@ -588,25 +588,25 @@ COMMAND_HANDLER(handle_flash_fill_command)
 	uint8_t *ptr = buffer + padding_at_start;
 
 	switch (wordsize) {
-		case 8:
-			for (i = 0; i < count; i++, ptr += wordsize)
-				target_buffer_set_u64(target, ptr, pattern);
-			break;
-		case 4:
-			for (i = 0; i < count; i++, ptr += wordsize)
-				target_buffer_set_u32(target, ptr, pattern);
-			break;
-		case 2:
-			for (i = 0; i < count; i++, ptr += wordsize)
-				target_buffer_set_u16(target, ptr, pattern);
-			break;
-		case 1:
-			memset(ptr, pattern, count);
-			ptr += count;
-			break;
-		default:
-			LOG_ERROR("BUG: can't happen");
-			exit(-1);
+	case 8:
+		for (i = 0; i < count; i++, ptr += wordsize)
+			target_buffer_set_u64(target, ptr, pattern);
+		break;
+	case 4:
+		for (i = 0; i < count; i++, ptr += wordsize)
+			target_buffer_set_u32(target, ptr, pattern);
+		break;
+	case 2:
+		for (i = 0; i < count; i++, ptr += wordsize)
+			target_buffer_set_u16(target, ptr, pattern);
+		break;
+	case 1:
+		memset(ptr, pattern, count);
+		ptr += count;
+		break;
+	default:
+		LOG_ERROR("BUG: can't happen");
+		exit(-1);
 	}
 
 	if (padding_at_end) {
@@ -631,18 +631,18 @@ COMMAND_HANDLER(handle_flash_fill_command)
 		uint64_t readback = 0;
 
 		switch (wordsize) {
-			case 8:
-				readback = target_buffer_get_u64(target, ptr);
-				break;
-			case 4:
-				readback = target_buffer_get_u32(target, ptr);
-				break;
-			case 2:
-				readback = target_buffer_get_u16(target, ptr);
-				break;
-			case 1:
-				readback = *ptr;
-				break;
+		case 8:
+			readback = target_buffer_get_u64(target, ptr);
+			break;
+		case 4:
+			readback = target_buffer_get_u32(target, ptr);
+			break;
+		case 2:
+			readback = target_buffer_get_u16(target, ptr);
+			break;
+		case 1:
+			readback = *ptr;
+			break;
 		}
 		if (readback != pattern) {
 			LOG_ERROR(
@@ -655,7 +655,7 @@ COMMAND_HANDLER(handle_flash_fill_command)
 		ptr += wordsize;
 	}
 
-	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
+	if (retval == ERROR_OK && duration_measure(&bench) == ERROR_OK) {
 		command_print(CMD, "wrote %" PRIu32 " bytes to " TARGET_ADDR_FMT
 			" in %fs (%0.3f KiB/s)", size_bytes, address,
 			duration_elapsed(&bench), duration_kbps(&bench, size_bytes));
@@ -683,17 +683,17 @@ COMMAND_HANDLER(handle_flash_md_command)
 
 	unsigned int wordsize;
 	switch (CMD_NAME[2]) {
-		case 'w':
-			wordsize = 4;
-			break;
-		case 'h':
-			wordsize = 2;
-			break;
-		case 'b':
-			wordsize = 1;
-			break;
-		default:
-			return ERROR_COMMAND_SYNTAX_ERROR;
+	case 'w':
+		wordsize = 4;
+		break;
+	case 'h':
+		wordsize = 2;
+		break;
+	case 'b':
+		wordsize = 1;
+		break;
+	default:
+		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
 	if (count == 0)
@@ -728,6 +728,124 @@ COMMAND_HANDLER(handle_flash_md_command)
 	return retval;
 }
 
+COMMAND_HANDLER(handle_flash_read_memory_command)
+{
+	/*
+	 * CMD_ARGV[0] = memory address
+	 * CMD_ARGV[1] = desired element width in bits
+	 * CMD_ARGV[2] = number of elements to read
+	 */
+
+	if (CMD_ARGC != 3)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	/* Arg 1: Memory address. */
+	target_addr_t addr;
+	COMMAND_PARSE_NUMBER(u64, CMD_ARGV[0], addr);
+
+	/* Arg 2: Bit width of one element. */
+	unsigned int width_bits;
+	COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], width_bits);
+
+	/* Arg 3: Number of elements to read. */
+	unsigned int count;
+	COMMAND_PARSE_NUMBER(uint, CMD_ARGV[2], count);
+
+	switch (width_bits) {
+	case 8:
+	case 16:
+	case 32:
+	case 64:
+		break;
+	default:
+		command_print(CMD, "invalid width, must be 8, 16, 32 or 64");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+
+	if (count > 65536) {
+		command_print(CMD, "too large read request, exceeds 64K elements");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+
+	const unsigned int width = width_bits / 8;
+	/* -1 is needed to handle cases when (addr + count * width) results in zero
+	 * due to overflow.
+	 */
+	if ((addr + count * width - 1) < addr) {
+		command_print(CMD, "memory region wraps over address zero");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+
+	struct target *target = get_current_target(CMD_CTX);
+	struct flash_bank *bank;
+	int retval = get_flash_bank_by_addr(target, addr, true, &bank);
+	if (retval != ERROR_OK)
+		return retval;
+
+	uint32_t offset = addr - bank->base;
+	uint32_t sizebytes = count * width_bits;
+	if (offset + sizebytes > bank->size) {
+		command_print(CMD, "cannot cross flash bank borders");
+		return ERROR_FAIL;
+	}
+
+	const size_t buffer_size = 4096;
+	uint8_t *buffer = malloc(buffer_size);
+
+	if (!buffer) {
+		command_print(CMD, "failed to allocate memory");
+		return ERROR_FAIL;
+	}
+
+	char *separator = "";
+	while (count > 0) {
+		const unsigned int max_chunk_len = buffer_size / width;
+		const size_t chunk_len = MIN(count, max_chunk_len);
+
+		retval = flash_driver_read(bank, buffer, offset, chunk_len * width);
+
+		if (retval != ERROR_OK) {
+			LOG_DEBUG("read at " TARGET_ADDR_FMT " with width=%u and count=%zu failed",
+				addr, width_bits, chunk_len);
+			/*
+			 * FIXME: we append the errmsg to the list of value already read.
+			 * Add a way to flush and replace old output, but LOG_DEBUG() it
+			 */
+			command_print(CMD, "failed to read memory");
+			free(buffer);
+			return retval;
+		}
+
+		for (size_t i = 0; i < chunk_len ; i++) {
+			uint64_t v = 0;
+
+			switch (width) {
+			case 8:
+				v = target_buffer_get_u64(target, &buffer[i * width]);
+				break;
+			case 4:
+				v = target_buffer_get_u32(target, &buffer[i * width]);
+				break;
+			case 2:
+				v = target_buffer_get_u16(target, &buffer[i * width]);
+				break;
+			case 1:
+				v = buffer[i];
+				break;
+			}
+
+			command_print_sameline(CMD, "%s0x%" PRIx64, separator, v);
+			separator = " ";
+		}
+
+		count -= chunk_len;
+		offset += chunk_len * width;
+	}
+
+	free(buffer);
+
+	return ERROR_OK;
+}
 
 COMMAND_HANDLER(handle_flash_write_bank_command)
 {
@@ -832,7 +950,7 @@ COMMAND_HANDLER(handle_flash_write_bank_command)
 
 	free(buffer);
 
-	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
+	if (retval == ERROR_OK && duration_measure(&bench) == ERROR_OK) {
 		command_print(CMD, "wrote %zu bytes from file %s to flash bank %u"
 			" at offset 0x%8.8" PRIx32 " in %fs (%0.3f KiB/s)",
 			length, CMD_ARGV[1], bank->bank_number, offset,
@@ -1172,6 +1290,13 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.help = "Display words from flash.",
 	},
 	{
+		.name = "read_memory",
+		.mode = COMMAND_EXEC,
+		.handler = handle_flash_read_memory_command,
+		.help = "Read Tcl list of 8/16/32/64 bit numbers from flash memory",
+		.usage = "address width count",
+	},
+	{
 		.name = "write_bank",
 		.handler = handle_flash_write_bank_command,
 		.mode = COMMAND_EXEC,
@@ -1317,8 +1442,7 @@ COMMAND_HANDLER(handle_flash_banks_command)
 	if (CMD_ARGC != 0)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	unsigned int n = 0;
-	for (struct flash_bank *p = flash_bank_list(); p; p = p->next, n++) {
+	for (struct flash_bank *p = flash_bank_list(); p; p = p->next) {
 		command_print(CMD, "#%d : %s (%s) at " TARGET_ADDR_FMT ", size 0x%8.8" PRIx32 ", "
 			"buswidth %u, chipwidth %u", p->bank_number,
 			p->name, p->driver->name, p->base, p->size,
@@ -1335,7 +1459,7 @@ COMMAND_HANDLER(handle_flash_list)
 	for (struct flash_bank *p = flash_bank_list(); p; p = p->next) {
 		command_print(CMD,
 			"{\n"
-			"    name       %s\n"
+			"    name       {%s}\n"
 			"    driver     %s\n"
 			"    base       " TARGET_ADDR_FMT "\n"
 			"    size       0x%" PRIx32 "\n"

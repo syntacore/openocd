@@ -89,7 +89,6 @@
 #define JTAG_MODE_ALT (LSB_FIRST | NEG_EDGE_IN | NEG_EDGE_OUT)
 #define SWD_MODE (LSB_FIRST | POS_EDGE_IN | NEG_EDGE_OUT)
 
-static char *ftdi_device_desc;
 static uint8_t ftdi_channel;
 static uint8_t ftdi_jtag_mode = JTAG_MODE;
 
@@ -113,12 +112,12 @@ static void cjtag_reset_online_activate(void);
   to the two-wire clocking and signaling of OScan1 protocol, if placed into OScan1 mode
   during initialization.
 */
-static void oscan1_mpsse_clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
-				    unsigned in_offset, unsigned length, uint8_t mode);
-static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
-				      unsigned in_offset, unsigned length, bool tdi, uint8_t mode);
-static void oscan1_mpsse_clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset,
-					  unsigned length, bool tdi, uint8_t mode);
+static void oscan1_mpsse_clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset, uint8_t *in,
+				    unsigned int in_offset, unsigned int length, uint8_t mode);
+static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset, uint8_t *in,
+				      unsigned int in_offset, unsigned int length, bool tdi, uint8_t mode);
+static void oscan1_mpsse_clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset,
+					  unsigned int length, bool tdi, uint8_t mode);
 
 static bool oscan1_mode;
 
@@ -127,11 +126,6 @@ static bool oscan1_mode;
 */
 static bool jscan3_mode;
 #endif
-
-#define MAX_USB_IDS 8
-/* vid = pid = 0 marks the end of the list */
-static uint16_t ftdi_vid[MAX_USB_IDS + 1] = { 0 };
-static uint16_t ftdi_pid[MAX_USB_IDS + 1] = { 0 };
 
 static struct mpsse_ctx *mpsse_ctx;
 
@@ -274,8 +268,8 @@ static int ftdi_get_signal(const struct signal *s, uint16_t *value_out)
 }
 
 #if BUILD_FTDI_CJTAG == 1
-static void clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
-		     unsigned in_offset, unsigned length, uint8_t mode)
+static void clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset, uint8_t *in,
+		     unsigned int in_offset, unsigned int length, uint8_t mode)
 {
 	if (oscan1_mode)
 		oscan1_mpsse_clock_data(ctx, out, out_offset, in, in_offset, length, mode);
@@ -283,8 +277,8 @@ static void clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_o
 		mpsse_clock_data(ctx, out, out_offset, in, in_offset, length, mode);
 }
 
-static void clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
-		       unsigned in_offset, unsigned length, bool tdi, uint8_t mode)
+static void clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset, uint8_t *in,
+		       unsigned int in_offset, unsigned int length, bool tdi, uint8_t mode)
 {
 	if (oscan1_mode)
 		oscan1_mpsse_clock_tms_cs(ctx, out, out_offset, in, in_offset, length, tdi, mode);
@@ -292,8 +286,8 @@ static void clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out
 		mpsse_clock_tms_cs(ctx, out, out_offset, in, in_offset, length, tdi, mode);
 }
 
-static void clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset,
-			   unsigned length, bool tdi, uint8_t mode)
+static void clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset,
+			   unsigned int length, bool tdi, uint8_t mode)
 {
 	if (oscan1_mode)
 		oscan1_mpsse_clock_tms_cs_out(ctx, out, out_offset, length, tdi, mode);
@@ -543,6 +537,10 @@ static void ftdi_execute_scan(struct jtag_command *cmd)
 			uint8_t last_bit = 0;
 			if (field->out_value)
 				bit_copy(&last_bit, 0, field->out_value, field->num_bits - 1, 1);
+
+			/* If endstate is TAP_IDLE, clock out 1-1-0 (->EXIT1 ->UPDATE ->IDLE)
+			 * Otherwise, clock out 1-0 (->EXIT1 ->PAUSE)
+			 */
 			uint8_t tms_bits = 0x03;
 			DO_CLOCK_TMS_CS(mpsse_ctx,
 					&tms_bits,
@@ -666,38 +664,38 @@ static void ftdi_execute_command(struct jtag_command *cmd)
 {
 	switch (cmd->type) {
 #if BUILD_FTDI_CJTAG == 1
-		case JTAG_RESET:
-			if (cmd->cmd.reset->trst)
-				cjtag_reset_online_activate(); /* put the target (back) into selected cJTAG mode */
-			break;
-#endif
-		case JTAG_RUNTEST:
-			ftdi_execute_runtest(cmd);
-			break;
-		case JTAG_TLR_RESET:
-#if BUILD_FTDI_CJTAG == 1
+	case JTAG_RESET:
+		if (cmd->cmd.reset->trst)
 			cjtag_reset_online_activate(); /* put the target (back) into selected cJTAG mode */
+		break;
 #endif
-			ftdi_execute_statemove(cmd);
-			break;
-		case JTAG_PATHMOVE:
-			ftdi_execute_pathmove(cmd);
-			break;
-		case JTAG_SCAN:
-			ftdi_execute_scan(cmd);
-			break;
-		case JTAG_SLEEP:
-			ftdi_execute_sleep(cmd);
-			break;
-		case JTAG_STABLECLOCKS:
-			ftdi_execute_stableclocks(cmd);
-			break;
-		case JTAG_TMS:
-			ftdi_execute_tms(cmd);
-			break;
-		default:
-			LOG_ERROR("BUG: unknown JTAG command type encountered: %d", cmd->type);
-			break;
+	case JTAG_RUNTEST:
+		ftdi_execute_runtest(cmd);
+		break;
+	case JTAG_TLR_RESET:
+#if BUILD_FTDI_CJTAG == 1
+		cjtag_reset_online_activate(); /* put the target (back) into selected cJTAG mode */
+#endif
+		ftdi_execute_statemove(cmd);
+		break;
+	case JTAG_PATHMOVE:
+		ftdi_execute_pathmove(cmd);
+		break;
+	case JTAG_SCAN:
+		ftdi_execute_scan(cmd);
+		break;
+	case JTAG_SLEEP:
+		ftdi_execute_sleep(cmd);
+		break;
+	case JTAG_STABLECLOCKS:
+		ftdi_execute_stableclocks(cmd);
+		break;
+	case JTAG_TMS:
+		ftdi_execute_tms(cmd);
+		break;
+	default:
+		LOG_ERROR("BUG: unknown JTAG command type encountered: %d", cmd->type);
+		break;
 	}
 }
 
@@ -730,13 +728,14 @@ static int ftdi_initialize(void)
 	else
 		LOG_DEBUG("ftdi interface using shortest path jtag state transitions");
 
-	if (!ftdi_vid[0] && !ftdi_pid[0]) {
-		LOG_ERROR("Please specify ftdi vid_pid");
+	if (!adapter_usb_get_vids()[0] && !adapter_usb_get_pids()[0]) {
+		LOG_ERROR("Please specify 'adapter usb vid_pid'");
 		return ERROR_JTAG_INIT_FAILED;
 	}
 
-	mpsse_ctx = mpsse_open(ftdi_vid, ftdi_pid, ftdi_device_desc,
-				adapter_get_required_serial(), adapter_usb_get_location(), ftdi_channel);
+	mpsse_ctx = mpsse_open(adapter_usb_get_vids(), adapter_usb_get_pids(),
+		adapter_usb_get_product_name(), adapter_get_required_serial(),
+		adapter_usb_get_location(), ftdi_channel);
 	if (!mpsse_ctx)
 		return ERROR_JTAG_INIT_FAILED;
 
@@ -760,9 +759,9 @@ static int ftdi_initialize(void)
 			return ERROR_JTAG_INIT_FAILED;
 		}
 		/* A dummy JTAG_SEL would have zero mask */
-		if (sig->data_mask)
+		if (sig->data_mask) {
 			ftdi_set_signal(sig, '0');
-		else if (jscan3_mode) {
+		} else if (jscan3_mode) {
 			LOG_ERROR("In JScan3 mode JTAG_SEL signal cannot be dummy, data mask needed");
 			return ERROR_JTAG_INIT_FAILED;
 		}
@@ -791,25 +790,23 @@ static int ftdi_quit(void)
 		sig = next;
 	}
 
-	free(ftdi_device_desc);
-
 	free(swd_cmd_queue);
 
 	return ERROR_OK;
 }
 
 #if BUILD_FTDI_CJTAG == 1
-static void oscan1_mpsse_clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
-		     unsigned in_offset, unsigned length, uint8_t mode)
+static void oscan1_mpsse_clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset, uint8_t *in,
+		     unsigned int in_offset, unsigned int length, uint8_t mode)
 {
 	static const uint8_t zero;
 	static const uint8_t one = 1;
 
 	struct signal *tmsc_en = find_signal_by_name("TMSC_EN");
 
-	LOG_DEBUG_IO("oscan1_mpsse_clock_data: %sout %d bits", in ? "in" : "", length);
+	LOG_DEBUG_IO("%sout %d bits", in ? "in" : "", length);
 
-	for (unsigned i = 0; i < length; i++) {
+	for (unsigned int i = 0; i < length; i++) {
 		int bitnum;
 		uint8_t bit;
 
@@ -817,7 +814,7 @@ static void oscan1_mpsse_clock_data(struct mpsse_ctx *ctx, const uint8_t *out, u
 
 		/* drive TMSC to the *negation* of the desired TDI value */
 		bitnum = out_offset + i;
-		bit = out ? ((out[bitnum/8] >> (bitnum%8)) & 0x1) : 0;
+		bit = out ? ((out[bitnum / 8] >> (bitnum % 8)) & 0x1) : 0;
 
 		/* Try optimized case first: if desired TDI bit is 1, then we
 		   can fuse what would otherwise be the first two MPSSE commands */
@@ -836,25 +833,24 @@ static void oscan1_mpsse_clock_data(struct mpsse_ctx *ctx, const uint8_t *out, u
 			ftdi_set_signal(tmsc_en, '0'); /* put TMSC in high impedance */
 
 		/* drive another TCK without driving TMSC (TDO cycle) */
-		mpsse_clock_tms_cs(mpsse_ctx, &zero, 0, in, in_offset+i, 1, false, mode);
+		mpsse_clock_tms_cs(mpsse_ctx, &zero, 0, in, in_offset + i, 1, false, mode);
 
 		if (tmsc_en)
 			ftdi_set_signal(tmsc_en, '1'); /* drive again TMSC */
 	}
 }
 
-
-static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
-		       unsigned in_offset, unsigned length, bool tdi, uint8_t mode)
+static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset, uint8_t *in,
+		       unsigned int in_offset, unsigned int length, bool tdi, uint8_t mode)
 {
 	static const uint8_t zero;
 	static const uint8_t one = 1;
 
 	struct signal *tmsc_en = find_signal_by_name("TMSC_EN");
 
-	LOG_DEBUG_IO("oscan1_mpsse_clock_tms_cs: %sout %d bits, tdi=%d", in ? "in" : "", length, tdi);
+	LOG_DEBUG_IO("%sout %d bits, tdi=%d", in ? "in" : "", length, tdi);
 
-	for (unsigned i = 0; i < length; i++) {
+	for (unsigned int i = 0; i < length; i++) {
 		int bitnum;
 		uint8_t tmsbit;
 		uint8_t tdibit;
@@ -866,7 +862,7 @@ static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out,
 
 		/* drive TMSC to desired TMS value */
 		bitnum = out_offset + i;
-		tmsbit = ((out[bitnum/8] >> (bitnum%8)) & 0x1);
+		tmsbit = ((out[bitnum / 8] >> (bitnum % 8)) & 0x1);
 
 		if (tdibit == tmsbit) {
 			/* Can squash into a single MPSSE command */
@@ -882,20 +878,18 @@ static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out,
 			ftdi_set_signal(tmsc_en, '0'); /* put TMSC in high impedance */
 
 		/* drive another TCK without driving TMSC (TDO cycle) */
-		mpsse_clock_tms_cs(mpsse_ctx, &zero, 0, in, in_offset+i, 1, false, mode);
+		mpsse_clock_tms_cs(mpsse_ctx, &zero, 0, in, in_offset + i, 1, false, mode);
 
 		if (tmsc_en)
 			ftdi_set_signal(tmsc_en, '1'); /* drive again TMSC */
 	}
 }
 
-
-static void oscan1_mpsse_clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset,
-			   unsigned length, bool tdi, uint8_t mode)
+static void oscan1_mpsse_clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned int out_offset,
+			   unsigned int length, bool tdi, uint8_t mode)
 {
 	oscan1_mpsse_clock_tms_cs(ctx, out, out_offset, 0, 0, length, tdi, mode);
 }
-
 
 static void cjtag_set_tck_tms_tdi(struct signal *tck, char tckvalue, struct signal *tms,
 				   char tmsvalue, struct signal *tdi, char tdivalue)
@@ -1062,7 +1056,7 @@ static void cjtag_reset_online_activate(void)
 	if (jscan3_mode) {
 		/* Update the sequence above to enable JScan3 instead of OScan1 */
 		sequence[ESCAPE_SEQ_OAC_BIT2].tdi = '0';
-		sequence[ESCAPE_SEQ_OAC_BIT2+1].tdi = '0';
+		sequence[ESCAPE_SEQ_OAC_BIT2 + 1].tdi = '0';
 	}
 
 	/* if defined TMSC_EN, replace tms with it */
@@ -1070,7 +1064,7 @@ static void cjtag_reset_online_activate(void)
 		tms = tmsc_en;
 
 	/* Send the sequence to the adapter */
-	for (size_t i = 0; i < sizeof(sequence)/sizeof(sequence[0]); i++)
+	for (size_t i = 0; i < ARRAY_SIZE(sequence); i++)
 		cjtag_set_tck_tms_tdi(tck, sequence[i].tck, tms, sequence[i].tms, tdi, sequence[i].tdi);
 
 	/* If JScan3 mode, configure cJTAG adapter to 4-wire */
@@ -1079,20 +1073,7 @@ static void cjtag_reset_online_activate(void)
 
 	ftdi_get_signal(tdo, &tdovalue);  /* Just to force a flush */
 }
-
 #endif /* #if BUILD_FTDI_CJTAG == 1 */
-
-COMMAND_HANDLER(ftdi_handle_device_desc_command)
-{
-	if (CMD_ARGC == 1) {
-		free(ftdi_device_desc);
-		ftdi_device_desc = strdup(CMD_ARGV[0]);
-	} else {
-		LOG_ERROR("expected exactly one argument to ftdi device_desc <description>");
-	}
-
-	return ERROR_OK;
-}
 
 COMMAND_HANDLER(ftdi_handle_channel_command)
 {
@@ -1240,36 +1221,6 @@ COMMAND_HANDLER(ftdi_handle_get_signal_command)
 	return ERROR_OK;
 }
 
-COMMAND_HANDLER(ftdi_handle_vid_pid_command)
-{
-	if (CMD_ARGC > MAX_USB_IDS * 2) {
-		LOG_WARNING("ignoring extra IDs in ftdi vid_pid "
-			"(maximum is %d pairs)", MAX_USB_IDS);
-		CMD_ARGC = MAX_USB_IDS * 2;
-	}
-	if (CMD_ARGC < 2 || (CMD_ARGC & 1)) {
-		LOG_WARNING("incomplete ftdi vid_pid configuration directive");
-		if (CMD_ARGC < 2)
-			return ERROR_COMMAND_SYNTAX_ERROR;
-		/* remove the incomplete trailing id */
-		CMD_ARGC -= 1;
-	}
-
-	unsigned int i;
-	for (i = 0; i < CMD_ARGC; i += 2) {
-		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i], ftdi_vid[i >> 1]);
-		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i + 1], ftdi_pid[i >> 1]);
-	}
-
-	/*
-	 * Explicitly terminate, in case there are multiples instances of
-	 * ftdi vid_pid.
-	 */
-	ftdi_vid[i >> 1] = ftdi_pid[i >> 1] = 0;
-
-	return ERROR_OK;
-}
-
 COMMAND_HANDLER(ftdi_handle_tdo_sample_edge_command)
 {
 	const struct nvp *n;
@@ -1321,13 +1272,6 @@ COMMAND_HANDLER(ftdi_handle_jscan3_mode_command)
 
 static const struct command_registration ftdi_subcommand_handlers[] = {
 	{
-		.name = "device_desc",
-		.handler = &ftdi_handle_device_desc_command,
-		.mode = COMMAND_CONFIG,
-		.help = "set the USB device description of the FTDI device",
-		.usage = "description_string",
-	},
-	{
 		.name = "channel",
 		.handler = &ftdi_handle_channel_command,
 		.mode = COMMAND_CONFIG,
@@ -1363,13 +1307,6 @@ static const struct command_registration ftdi_subcommand_handlers[] = {
 		.mode = COMMAND_EXEC,
 		.help = "read the value of a layout-specific signal",
 		.usage = "name",
-	},
-	{
-		.name = "vid_pid",
-		.handler = &ftdi_handle_vid_pid_command,
-		.mode = COMMAND_CONFIG,
-		.help = "the vendor ID and product ID of the FTDI device",
-		.usage = "(vid pid)*",
 	},
 	{
 		.name = "tdo_sample_edge",

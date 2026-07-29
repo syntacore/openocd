@@ -193,8 +193,8 @@ static int esp32s3_soc_reset(struct target *target)
 		xtensa_poll(target);
 		if (timeval_ms() >= timeout) {
 			LOG_TARGET_ERROR(target,
-				"Timed out waiting for CPU to be reset, target state=%d",
-				target->state);
+				"Timed out waiting for CPU to be reset, target state %s",
+				target_state_name(target));
 			get_timeout = true;
 			break;
 		}
@@ -378,6 +378,13 @@ static const struct command_registration esp32s3_command_handlers[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
+static int esp32s3_insn_set(struct command_invocation *cmd,
+	struct target *target, const char **insn_set)
+{
+	*insn_set = "xtensa_s2";
+	return ERROR_OK;
+}
+
 /** Holds methods for Xtensa targets. */
 struct target_type esp32s3_target = {
 	.name = "esp32s3",
@@ -423,4 +430,5 @@ struct target_type esp32s3_target = {
 
 	.commands = esp32s3_command_handlers,
 	.profiling = esp_xtensa_profiling,
+	.insn_set = esp32s3_insn_set,
 };

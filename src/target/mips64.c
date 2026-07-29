@@ -224,7 +224,6 @@ static int reg_type2size(enum reg_type type)
 
 static int mips64_get_core_reg(struct reg *reg)
 {
-	int retval;
 	struct mips64_core_reg *mips64_reg = reg->arch_info;
 	struct target *target = mips64_reg->target;
 	struct mips64_common *mips64_target = target->arch_info;
@@ -232,9 +231,7 @@ static int mips64_get_core_reg(struct reg *reg)
 	if (target->state != TARGET_HALTED)
 		return ERROR_TARGET_NOT_HALTED;
 
-	retval = mips64_target->read_core_reg(target, mips64_reg->num);
-
-	return retval;
+	return mips64_target->read_core_reg(target, mips64_reg->num);
 }
 
 static int mips64_set_core_reg(struct reg *reg, uint8_t *buf)
@@ -283,7 +280,7 @@ static int mips64_write_core_reg(struct target *target, int num)
 
 	reg_value = buf_get_u64(mips64->core_cache->reg_list[num].value, 0, 64);
 	mips64->core_regs[num] = reg_value;
-	LOG_DEBUG("write core reg %i value 0x%" PRIx64 "", num, reg_value);
+	LOG_DEBUG("write core reg %i value 0x%" PRIx64, num, reg_value);
 	mips64->core_cache->reg_list[num].valid = true;
 	mips64->core_cache->reg_list[num].dirty = false;
 
@@ -361,7 +358,7 @@ int mips64_arch_state(struct target *target)
 		exit(-1);
 	}
 
-	LOG_USER("target halted due to %s, pc: 0x%" PRIx64 "",
+	LOG_USER("target halted due to %s, pc: 0x%" PRIx64,
 		 debug_reason_name(target), buf_get_u64(pc->value, 0, 64));
 
 	return ERROR_OK;
@@ -478,8 +475,6 @@ int mips64_examine(struct target *target)
 	mips64->num_data_bpoints_avail = 0;
 	mips64->num_inst_bpoints = 0;
 	mips64->num_inst_bpoints_avail = 0;
-
-	target_set_examined(target);
 
 	return ERROR_OK;
 }

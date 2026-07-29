@@ -608,28 +608,28 @@ static int transfer_error_status(const struct libusb_transfer *transfer)
 	int r = 0;
 
 	switch (transfer->status) {
-		case LIBUSB_TRANSFER_COMPLETED:
-			r = 0;
-			break;
-		case LIBUSB_TRANSFER_TIMED_OUT:
-			r = LIBUSB_ERROR_TIMEOUT;
-			break;
-		case LIBUSB_TRANSFER_STALL:
-			r = LIBUSB_ERROR_PIPE;
-			break;
-		case LIBUSB_TRANSFER_OVERFLOW:
-			r = LIBUSB_ERROR_OVERFLOW;
-			break;
-		case LIBUSB_TRANSFER_NO_DEVICE:
-			r = LIBUSB_ERROR_NO_DEVICE;
-			break;
-		case LIBUSB_TRANSFER_ERROR:
-		case LIBUSB_TRANSFER_CANCELLED:
-			r = LIBUSB_ERROR_IO;
-			break;
-		default:
-			r = LIBUSB_ERROR_OTHER;
-			break;
+	case LIBUSB_TRANSFER_COMPLETED:
+		r = 0;
+		break;
+	case LIBUSB_TRANSFER_TIMED_OUT:
+		r = LIBUSB_ERROR_TIMEOUT;
+		break;
+	case LIBUSB_TRANSFER_STALL:
+		r = LIBUSB_ERROR_PIPE;
+		break;
+	case LIBUSB_TRANSFER_OVERFLOW:
+		r = LIBUSB_ERROR_OVERFLOW;
+		break;
+	case LIBUSB_TRANSFER_NO_DEVICE:
+		r = LIBUSB_ERROR_NO_DEVICE;
+		break;
+	case LIBUSB_TRANSFER_ERROR:
+	case LIBUSB_TRANSFER_CANCELLED:
+		r = LIBUSB_ERROR_IO;
+		break;
+	default:
+		r = LIBUSB_ERROR_OTHER;
+		break;
 	}
 
 	return r;
@@ -1058,13 +1058,13 @@ static int stlink_usb_error_check(void *handle)
 
 	if (h->st_mode == STLINK_MODE_DEBUG_SWIM) {
 		switch (h->databuf[0]) {
-			case STLINK_SWIM_ERR_OK:
-				return ERROR_OK;
-			case STLINK_SWIM_BUSY:
-				return ERROR_WAIT;
-			default:
-				LOG_DEBUG("unknown/unexpected STLINK status code 0x%x", h->databuf[0]);
-				return ERROR_FAIL;
+		case STLINK_SWIM_ERR_OK:
+			return ERROR_OK;
+		case STLINK_SWIM_BUSY:
+			return ERROR_WAIT;
+		default:
+			LOG_DEBUG("unknown/unexpected STLINK status code 0x%x", h->databuf[0]);
+			return ERROR_FAIL;
 		}
 	}
 
@@ -1073,64 +1073,64 @@ static int stlink_usb_error_check(void *handle)
 		h->databuf[0] = STLINK_DEBUG_ERR_OK;
 
 	switch (h->databuf[0]) {
-		case STLINK_DEBUG_ERR_OK:
-			return ERROR_OK;
-		case STLINK_DEBUG_ERR_FAULT:
-			LOG_DEBUG("SWD fault response (0x%x)", STLINK_DEBUG_ERR_FAULT);
-			return ERROR_FAIL;
-		case STLINK_SWD_AP_WAIT:
-			LOG_DEBUG("wait status SWD_AP_WAIT (0x%x)", STLINK_SWD_AP_WAIT);
-			return ERROR_WAIT;
-		case STLINK_SWD_DP_WAIT:
-			LOG_DEBUG("wait status SWD_DP_WAIT (0x%x)", STLINK_SWD_DP_WAIT);
-			return ERROR_WAIT;
-		case STLINK_JTAG_GET_IDCODE_ERROR:
-			LOG_DEBUG("STLINK_JTAG_GET_IDCODE_ERROR");
-			return ERROR_FAIL;
-		case STLINK_JTAG_WRITE_ERROR:
-			LOG_DEBUG("Write error");
-			return ERROR_FAIL;
-		case STLINK_JTAG_WRITE_VERIF_ERROR:
-			LOG_DEBUG("Write verify error, ignoring");
-			return ERROR_OK;
-		case STLINK_SWD_AP_FAULT:
-			/* git://git.ac6.fr/openocd commit 657e3e885b9ee10
-			 * returns ERROR_OK with the comment:
-			 * Change in error status when reading outside RAM.
-			 * This fix allows CDT plugin to visualize memory.
-			 */
-			LOG_DEBUG("STLINK_SWD_AP_FAULT");
-			return ERROR_FAIL;
-		case STLINK_SWD_AP_ERROR:
-			LOG_DEBUG("STLINK_SWD_AP_ERROR");
-			return ERROR_FAIL;
-		case STLINK_SWD_AP_PARITY_ERROR:
-			LOG_DEBUG("STLINK_SWD_AP_PARITY_ERROR");
-			return ERROR_FAIL;
-		case STLINK_SWD_DP_FAULT:
-			LOG_DEBUG("STLINK_SWD_DP_FAULT");
-			return ERROR_FAIL;
-		case STLINK_SWD_DP_ERROR:
-			LOG_DEBUG("STLINK_SWD_DP_ERROR");
-			return ERROR_FAIL;
-		case STLINK_SWD_DP_PARITY_ERROR:
-			LOG_DEBUG("STLINK_SWD_DP_PARITY_ERROR");
-			return ERROR_FAIL;
-		case STLINK_SWD_AP_WDATA_ERROR:
-			LOG_DEBUG("STLINK_SWD_AP_WDATA_ERROR");
-			return ERROR_FAIL;
-		case STLINK_SWD_AP_STICKY_ERROR:
-			LOG_DEBUG("STLINK_SWD_AP_STICKY_ERROR");
-			return ERROR_FAIL;
-		case STLINK_SWD_AP_STICKYORUN_ERROR:
-			LOG_DEBUG("STLINK_SWD_AP_STICKYORUN_ERROR");
-			return ERROR_FAIL;
-		case STLINK_BAD_AP_ERROR:
-			LOG_DEBUG("STLINK_BAD_AP_ERROR");
-			return ERROR_FAIL;
-		default:
-			LOG_DEBUG("unknown/unexpected STLINK status code 0x%x", h->databuf[0]);
-			return ERROR_FAIL;
+	case STLINK_DEBUG_ERR_OK:
+		return ERROR_OK;
+	case STLINK_DEBUG_ERR_FAULT:
+		LOG_DEBUG("SWD fault response (0x%x)", STLINK_DEBUG_ERR_FAULT);
+		return ERROR_FAIL;
+	case STLINK_SWD_AP_WAIT:
+		LOG_DEBUG("wait status SWD_AP_WAIT (0x%x)", STLINK_SWD_AP_WAIT);
+		return ERROR_WAIT;
+	case STLINK_SWD_DP_WAIT:
+		LOG_DEBUG("wait status SWD_DP_WAIT (0x%x)", STLINK_SWD_DP_WAIT);
+		return ERROR_WAIT;
+	case STLINK_JTAG_GET_IDCODE_ERROR:
+		LOG_DEBUG("STLINK_JTAG_GET_IDCODE_ERROR");
+		return ERROR_FAIL;
+	case STLINK_JTAG_WRITE_ERROR:
+		LOG_DEBUG("Write error");
+		return ERROR_FAIL;
+	case STLINK_JTAG_WRITE_VERIF_ERROR:
+		LOG_DEBUG("Write verify error, ignoring");
+		return ERROR_OK;
+	case STLINK_SWD_AP_FAULT:
+		/* git://git.ac6.fr/openocd commit 657e3e885b9ee10
+		 * returns ERROR_OK with the comment:
+		 * Change in error status when reading outside RAM.
+		 * This fix allows CDT plugin to visualize memory.
+		 */
+		LOG_DEBUG("STLINK_SWD_AP_FAULT");
+		return ERROR_FAIL;
+	case STLINK_SWD_AP_ERROR:
+		LOG_DEBUG("STLINK_SWD_AP_ERROR");
+		return ERROR_FAIL;
+	case STLINK_SWD_AP_PARITY_ERROR:
+		LOG_DEBUG("STLINK_SWD_AP_PARITY_ERROR");
+		return ERROR_FAIL;
+	case STLINK_SWD_DP_FAULT:
+		LOG_DEBUG("STLINK_SWD_DP_FAULT");
+		return ERROR_FAIL;
+	case STLINK_SWD_DP_ERROR:
+		LOG_DEBUG("STLINK_SWD_DP_ERROR");
+		return ERROR_FAIL;
+	case STLINK_SWD_DP_PARITY_ERROR:
+		LOG_DEBUG("STLINK_SWD_DP_PARITY_ERROR");
+		return ERROR_FAIL;
+	case STLINK_SWD_AP_WDATA_ERROR:
+		LOG_DEBUG("STLINK_SWD_AP_WDATA_ERROR");
+		return ERROR_FAIL;
+	case STLINK_SWD_AP_STICKY_ERROR:
+		LOG_DEBUG("STLINK_SWD_AP_STICKY_ERROR");
+		return ERROR_FAIL;
+	case STLINK_SWD_AP_STICKYORUN_ERROR:
+		LOG_DEBUG("STLINK_SWD_AP_STICKYORUN_ERROR");
+		return ERROR_FAIL;
+	case STLINK_BAD_AP_ERROR:
+		LOG_DEBUG("STLINK_BAD_AP_ERROR");
+		return ERROR_FAIL;
+	default:
+		LOG_DEBUG("unknown/unexpected STLINK status code 0x%x", h->databuf[0]);
+		return ERROR_FAIL;
 	}
 }
 
@@ -1597,31 +1597,31 @@ static int stlink_usb_mode_enter(void *handle, enum stlink_mode type)
 	stlink_usb_init_buffer(handle, h->rx_ep, rx_size);
 
 	switch (type) {
-		case STLINK_MODE_DEBUG_JTAG:
-			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_COMMAND;
-			if (h->version.jtag_api == STLINK_JTAG_API_V1)
-				h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV1_ENTER;
-			else
-				h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV2_ENTER;
-			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_ENTER_JTAG_NO_RESET;
-			break;
-		case STLINK_MODE_DEBUG_SWD:
-			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_COMMAND;
-			if (h->version.jtag_api == STLINK_JTAG_API_V1)
-				h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV1_ENTER;
-			else
-				h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV2_ENTER;
-			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_ENTER_SWD_NO_RESET;
-			break;
-		case STLINK_MODE_DEBUG_SWIM:
-			h->cmdbuf[h->cmdidx++] = STLINK_SWIM_COMMAND;
-			h->cmdbuf[h->cmdidx++] = STLINK_SWIM_ENTER;
-			/* swim enter does not return any response or status */
-			return stlink_usb_xfer_noerrcheck(handle, h->databuf, 0);
-		case STLINK_MODE_DFU:
-		case STLINK_MODE_MASS:
-		default:
-			return ERROR_FAIL;
+	case STLINK_MODE_DEBUG_JTAG:
+		h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_COMMAND;
+		if (h->version.jtag_api == STLINK_JTAG_API_V1)
+			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV1_ENTER;
+		else
+			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV2_ENTER;
+		h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_ENTER_JTAG_NO_RESET;
+		break;
+	case STLINK_MODE_DEBUG_SWD:
+		h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_COMMAND;
+		if (h->version.jtag_api == STLINK_JTAG_API_V1)
+			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV1_ENTER;
+		else
+			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_APIV2_ENTER;
+		h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_ENTER_SWD_NO_RESET;
+		break;
+	case STLINK_MODE_DEBUG_SWIM:
+		h->cmdbuf[h->cmdidx++] = STLINK_SWIM_COMMAND;
+		h->cmdbuf[h->cmdidx++] = STLINK_SWIM_ENTER;
+		/* swim enter does not return any response or status */
+		return stlink_usb_xfer_noerrcheck(handle, h->databuf, 0);
+	case STLINK_MODE_DFU:
+	case STLINK_MODE_MASS:
+	default:
+		return ERROR_FAIL;
 	}
 
 	return stlink_cmd_allow_retry(handle, h->databuf, rx_size);
@@ -1639,22 +1639,22 @@ static int stlink_usb_mode_leave(void *handle, enum stlink_mode type)
 	stlink_usb_init_buffer(handle, h->rx_ep, 0);
 
 	switch (type) {
-		case STLINK_MODE_DEBUG_JTAG:
-		case STLINK_MODE_DEBUG_SWD:
-			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_COMMAND;
-			h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_EXIT;
-			break;
-		case STLINK_MODE_DEBUG_SWIM:
-			h->cmdbuf[h->cmdidx++] = STLINK_SWIM_COMMAND;
-			h->cmdbuf[h->cmdidx++] = STLINK_SWIM_EXIT;
-			break;
-		case STLINK_MODE_DFU:
-			h->cmdbuf[h->cmdidx++] = STLINK_DFU_COMMAND;
-			h->cmdbuf[h->cmdidx++] = STLINK_DFU_EXIT;
-			break;
-		case STLINK_MODE_MASS:
-		default:
-			return ERROR_FAIL;
+	case STLINK_MODE_DEBUG_JTAG:
+	case STLINK_MODE_DEBUG_SWD:
+		h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_COMMAND;
+		h->cmdbuf[h->cmdidx++] = STLINK_DEBUG_EXIT;
+		break;
+	case STLINK_MODE_DEBUG_SWIM:
+		h->cmdbuf[h->cmdidx++] = STLINK_SWIM_COMMAND;
+		h->cmdbuf[h->cmdidx++] = STLINK_SWIM_EXIT;
+		break;
+	case STLINK_MODE_DFU:
+		h->cmdbuf[h->cmdidx++] = STLINK_DFU_COMMAND;
+		h->cmdbuf[h->cmdidx++] = STLINK_DFU_EXIT;
+		break;
+	case STLINK_MODE_MASS:
+	default:
+		return ERROR_FAIL;
 	}
 
 	res = stlink_usb_xfer_noerrcheck(handle, h->databuf, 0);
@@ -1697,20 +1697,20 @@ static int stlink_usb_exit_mode(void *handle)
 
 	/* try to exit current mode */
 	switch (mode) {
-		case STLINK_DEV_DFU_MODE:
-			emode = STLINK_MODE_DFU;
-			break;
-		case STLINK_DEV_DEBUG_MODE:
-			emode = STLINK_MODE_DEBUG_SWD;
-			break;
-		case STLINK_DEV_SWIM_MODE:
-			emode = STLINK_MODE_DEBUG_SWIM;
-			break;
-		case STLINK_DEV_BOOTLOADER_MODE:
-		case STLINK_DEV_MASS_MODE:
-		default:
-			emode = STLINK_MODE_UNKNOWN;
-			break;
+	case STLINK_DEV_DFU_MODE:
+		emode = STLINK_MODE_DFU;
+		break;
+	case STLINK_DEV_DEBUG_MODE:
+		emode = STLINK_MODE_DEBUG_SWD;
+		break;
+	case STLINK_DEV_SWIM_MODE:
+		emode = STLINK_MODE_DEBUG_SWIM;
+		break;
+	case STLINK_DEV_BOOTLOADER_MODE:
+	case STLINK_DEV_MASS_MODE:
+	default:
+		emode = STLINK_MODE_UNKNOWN;
+		break;
 	}
 
 	if (emode != STLINK_MODE_UNKNOWN)
@@ -2303,16 +2303,13 @@ static int stlink_usb_reset(void *handle)
 /** */
 static int stlink_usb_run(void *handle)
 {
-	int res;
 	struct stlink_usb_handle *h = handle;
 
 	assert(handle);
 
-	if (h->version.jtag_api != STLINK_JTAG_API_V1) {
-		res = stlink_usb_write_debug_reg(handle, DCB_DHCSR, DBGKEY|C_DEBUGEN);
-
-		return res;
-	}
+	if (h->version.jtag_api != STLINK_JTAG_API_V1)
+		return stlink_usb_write_debug_reg(handle, DCB_DHCSR,
+					DBGKEY | C_DEBUGEN);
 
 	stlink_usb_init_buffer(handle, h->rx_ep, 2);
 
@@ -2325,16 +2322,13 @@ static int stlink_usb_run(void *handle)
 /** */
 static int stlink_usb_halt(void *handle)
 {
-	int res;
 	struct stlink_usb_handle *h = handle;
 
 	assert(handle);
 
-	if (h->version.jtag_api != STLINK_JTAG_API_V1) {
-		res = stlink_usb_write_debug_reg(handle, DCB_DHCSR, DBGKEY|C_HALT|C_DEBUGEN);
-
-		return res;
-	}
+	if (h->version.jtag_api != STLINK_JTAG_API_V1)
+		return stlink_usb_write_debug_reg(handle, DCB_DHCSR,
+					DBGKEY | C_HALT | C_DEBUGEN);
 
 	stlink_usb_init_buffer(handle, h->rx_ep, 2);
 
@@ -3406,7 +3400,7 @@ static int stlink_usb_usb_open(void *handle, struct hl_interface_param *param)
 	  in order to become operational.
 	 */
 	do {
-		if (jtag_libusb_open(param->vid, param->pid, NULL,
+		if (jtag_libusb_open(adapter_usb_get_vids(), adapter_usb_get_pids(), NULL,
 				&h->usb_backend_priv.fd, stlink_usb_get_alternate_serial) != ERROR_OK) {
 			LOG_ERROR("open failed");
 			return ERROR_FAIL;
@@ -3430,34 +3424,34 @@ static int stlink_usb_usb_open(void *handle, struct hl_interface_param *param)
 
 		/* wrap version for first read */
 		switch (pid) {
-			case STLINK_V1_PID:
-				h->version.stlink = 1;
-				h->tx_ep = STLINK_TX_EP;
-				break;
-			case STLINK_V3_USBLOADER_PID:
-			case STLINK_V3E_PID:
-			case STLINK_V3S_PID:
-			case STLINK_V3_2VCP_PID:
-			case STLINK_V3E_NO_MSD_PID:
-			case STLINK_V3P_USBLOADER_PID:
-			case STLINK_V3P_PID:
-				h->version.stlink = 3;
-				h->tx_ep = STLINK_V2_1_TX_EP;
-				h->trace_ep = STLINK_V2_1_TRACE_EP;
-				break;
-			case STLINK_V2_1_PID:
-			case STLINK_V2_1_NO_MSD_PID:
-				h->version.stlink = 2;
-				h->tx_ep = STLINK_V2_1_TX_EP;
-				h->trace_ep = STLINK_V2_1_TRACE_EP;
-				break;
-			default:
-			/* fall through - we assume V2 to be the default version*/
-			case STLINK_V2_PID:
-				h->version.stlink = 2;
-				h->tx_ep = STLINK_TX_EP;
-				h->trace_ep = STLINK_TRACE_EP;
-				break;
+		case STLINK_V1_PID:
+			h->version.stlink = 1;
+			h->tx_ep = STLINK_TX_EP;
+			break;
+		case STLINK_V3_USBLOADER_PID:
+		case STLINK_V3E_PID:
+		case STLINK_V3S_PID:
+		case STLINK_V3_2VCP_PID:
+		case STLINK_V3E_NO_MSD_PID:
+		case STLINK_V3P_USBLOADER_PID:
+		case STLINK_V3P_PID:
+			h->version.stlink = 3;
+			h->tx_ep = STLINK_V2_1_TX_EP;
+			h->trace_ep = STLINK_V2_1_TRACE_EP;
+			break;
+		case STLINK_V2_1_PID:
+		case STLINK_V2_1_NO_MSD_PID:
+			h->version.stlink = 2;
+			h->tx_ep = STLINK_V2_1_TX_EP;
+			h->trace_ep = STLINK_V2_1_TRACE_EP;
+			break;
+		default:
+		/* fall through - we assume V2 to be the default version */
+		case STLINK_V2_PID:
+			h->version.stlink = 2;
+			h->tx_ep = STLINK_TX_EP;
+			h->trace_ep = STLINK_TRACE_EP;
+			break;
 		}
 
 		/* get the device version */
@@ -3642,8 +3636,9 @@ static int stlink_tcp_open(void *handle, struct hl_interface_param *param)
 		stlink_used = h->tcp_backend_priv.recv_buf[44];
 
 		/* check the vid:pid */
-		for (int i = 0; param->vid[i]; i++) {
-			if (param->vid[i] == h->vid && param->pid[i] == h->pid) {
+		for (unsigned int i = 0; adapter_usb_get_vids()[i]; i++) {
+			if (h->vid == adapter_usb_get_vids()[i] &&
+					h->pid == adapter_usb_get_pids()[i]) {
 				stlink_id_matched = true;
 				break;
 			}
@@ -3740,9 +3735,9 @@ static int stlink_open(struct hl_interface_param *param, enum stlink_mode mode, 
 
 	h->st_mode = mode;
 
-	for (unsigned int i = 0; param->vid[i]; i++) {
+	for (unsigned int i = 0; adapter_usb_get_vids()[i]; i++) {
 		LOG_DEBUG("transport: %d vid: 0x%04x pid: 0x%04x serial: %s",
-			  h->st_mode, param->vid[i], param->pid[i],
+			  h->st_mode, adapter_usb_get_vids()[i], adapter_usb_get_pids()[i],
 			  adapter_get_required_serial() ? adapter_get_required_serial() : "");
 	}
 
@@ -3758,21 +3753,21 @@ static int stlink_open(struct hl_interface_param *param, enum stlink_mode mode, 
 	int err = ERROR_OK;
 
 	switch (h->st_mode) {
-		case STLINK_MODE_DEBUG_SWD:
-			if (h->version.jtag_api == STLINK_JTAG_API_V1)
-				err = ERROR_FAIL;
-			/* fall-through */
-		case STLINK_MODE_DEBUG_JTAG:
-			if (h->version.jtag == 0)
-				err = ERROR_FAIL;
-			break;
-		case STLINK_MODE_DEBUG_SWIM:
-			if (h->version.swim == 0)
-				err = ERROR_FAIL;
-			break;
-		default:
+	case STLINK_MODE_DEBUG_SWD:
+		if (h->version.jtag_api == STLINK_JTAG_API_V1)
 			err = ERROR_FAIL;
-			break;
+		/* fall-through */
+	case STLINK_MODE_DEBUG_JTAG:
+		if (h->version.jtag == 0)
+			err = ERROR_FAIL;
+		break;
+	case STLINK_MODE_DEBUG_SWIM:
+		if (h->version.swim == 0)
+			err = ERROR_FAIL;
+		break;
+	default:
+		err = ERROR_FAIL;
+		break;
 	}
 
 	if (err != ERROR_OK) {
@@ -4194,7 +4189,7 @@ static int stlink_dap_op_connect(struct adiv5_dap *dap)
 	uint32_t idcode;
 	int retval;
 
-	LOG_INFO("stlink_dap_op_connect(%sconnect)", dap->do_reconnect ? "re" : "");
+	LOG_DEBUG("%s(%sconnect)", __func__, dap->do_reconnect ? "re" : "");
 
 	/* Check if we should reset srst already when connecting, but not if reconnecting. */
 	if (!dap->do_reconnect) {
@@ -4284,8 +4279,6 @@ static int stlink_dap_dp_read(struct adiv5_dap *dap, unsigned int reg, uint32_t 
 /** */
 static int stlink_dap_dp_write(struct adiv5_dap *dap, unsigned int reg, uint32_t data)
 {
-	int retval;
-
 	if (!(stlink_dap_handle->version.flags & STLINK_F_HAS_DPBANKSEL))
 		if (reg & 0x000000F0) {
 			LOG_ERROR("Banked DP registers not supported in current STLink FW");
@@ -4302,9 +4295,8 @@ static int stlink_dap_dp_write(struct adiv5_dap *dap, unsigned int reg, uint32_t
 	if (reg == DP_CTRL_STAT)
 		data &= ~CORUNDETECT;
 
-	retval = stlink_write_dap_register(stlink_dap_handle,
+	return stlink_write_dap_register(stlink_dap_handle,
 				STLINK_DEBUG_PORT_ACCESS, reg, data);
-	return retval;
 }
 
 /** */
@@ -4985,31 +4977,6 @@ static int stlink_dap_trace_read(uint8_t *buf, size_t *size)
 }
 
 /** */
-COMMAND_HANDLER(stlink_dap_vid_pid)
-{
-	unsigned int i, max_usb_ids = HLA_MAX_USB_IDS;
-
-	if (CMD_ARGC > max_usb_ids * 2) {
-		LOG_WARNING("ignoring extra IDs in vid_pid "
-			"(maximum is %d pairs)", max_usb_ids);
-		CMD_ARGC = max_usb_ids * 2;
-	}
-	if (CMD_ARGC < 2 || (CMD_ARGC & 1)) {
-		LOG_WARNING("incomplete vid_pid configuration directive");
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
-	for (i = 0; i < CMD_ARGC; i += 2) {
-		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i], stlink_dap_param.vid[i / 2]);
-		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i + 1], stlink_dap_param.pid[i / 2]);
-	}
-
-	/* null termination */
-	stlink_dap_param.vid[i / 2] = stlink_dap_param.pid[i / 2] = 0;
-
-	return ERROR_OK;
-}
-
-/** */
 COMMAND_HANDLER(stlink_dap_backend_command)
 {
 	/* default values */
@@ -5074,13 +5041,6 @@ COMMAND_HANDLER(stlink_dap_cmd_command)
 
 /** */
 static const struct command_registration stlink_dap_subcommand_handlers[] = {
-	{
-		.name = "vid_pid",
-		.handler = stlink_dap_vid_pid,
-		.mode = COMMAND_CONFIG,
-		.help = "USB VID and PID of the adapter",
-		.usage = "(vid pid)+",
-	},
 	{
 		.name = "backend",
 		.handler = &stlink_dap_backend_command,

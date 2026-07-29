@@ -18,20 +18,22 @@
 #include "server/gdb_server.h"
 
 static const struct rtos_type *rtos_types[] = {
-	&threadx_rtos,
-	&freertos_rtos,
-	&ecos_rtos,
-	&linux_rtos,
+	// Keep in alphabetic order this list of rtos, except hwthread
 	&chibios_rtos,
 	&chromium_ec_rtos,
+	&ecos_rtos,
 	&embkernel_rtos,
+	&freertos_rtos,
+	&linux_rtos,
 	&mqx_rtos,
-	&ucos_iii_rtos,
 	&nuttx_rtos,
 	&riot_rtos,
-	&zephyr_rtos,
 	&rtkernel_rtos,
-	/* keep this as last, as it always matches with rtos auto */
+	&threadx_rtos,
+	&ucos_iii_rtos,
+	&zephyr_rtos,
+
+	// keep this as last, as it always matches with rtos auto
 	&hwthread_rtos,
 };
 
@@ -507,6 +509,26 @@ int rtos_thread_packet(struct connection *connection, char const *packet, int pa
 	return GDB_THREAD_PACKET_NOT_CONSUMED;
 }
 
+static int rtos_put_gdb_reg(struct connection *connection,
+		uint8_t *reg_value, unsigned int reg_size)
+{
+	unsigned int reg_bytes = DIV_ROUND_UP(reg_size, 8);
+	unsigned int num_bytes = reg_bytes * 2 + 1; // for '\0'
+
+	char *hex = malloc(num_bytes);
+	if (!hex) {
+		LOG_ERROR("Out of memory");
+		return ERROR_FAIL;
+	}
+
+	size_t len = hexify(hex, reg_value, reg_bytes, num_bytes);
+
+	gdb_put_packet(connection, hex, len);
+	free(hex);
+
+	return ERROR_OK;
+}
+
 static int rtos_put_gdb_reg_list(struct connection *connection,
 		struct rtos_reg *reg_list, int num_regs)
 {
@@ -543,21 +565,35 @@ int rtos_get_gdb_reg(struct connection *connection, int reg_num)
 		return ERROR_NOT_IMPLEMENTED;
 	}
 
-	struct rtos_reg *reg_list;
-	int num_regs;
+		LOG_DEBUG("getting register %d for thread 0x%" PRIx64
+				  ", target->rtos->current_thread=0x%" PRIx64,
+										reg_num,
+										current_threadid,
+										target->rtos->current_thread);
 
-	LOG_TARGET_DEBUG(target, "getting register %d for thread 0x%" PRIx64
-				", target->rtos->current_thread=0x%" PRIx64,
-				reg_num, current_threadid, target->rtos->current_thread);
+		int retval;
+		if (target->rtos->type->get_thread_reg_value) {
+			uint32_t reg_size;
+			uint8_t *reg_value;
+			retval = target->rtos->type->get_thread_reg_value(target->rtos,
+					current_threadid, reg_num, &reg_size, &reg_value);
+			if (retval != ERROR_OK) {
+				LOG_ERROR("RTOS: failed to get register %d", reg_num);
+				return retval;
+			}
 
-	int retval;
-	if (target->rtos->type->get_thread_reg_value) {
-		uint32_t reg_size;
-		uint8_t *reg_value;
-		retval = target->rtos->type->get_thread_reg_value(target->rtos,
-				current_threadid, reg_num, &reg_size, &reg_value);
+			retval = rtos_put_gdb_reg(connection, reg_value, reg_size);
+
+			free(reg_value);
+			return retval;
+		}
+
+		retval = target->rtos->type->get_thread_reg_list(target->rtos,
+					current_threadid,
+					&reg_list,
+					&num_regs);
 		if (retval != ERROR_OK) {
-			LOG_ERROR("RTOS: failed to get register %d", reg_num);
+			LOG_ERROR("RTOS: failed to get register list");
 			return retval;
 		}
 
@@ -596,10 +632,7 @@ int rtos_get_gdb_reg(struct connection *connection, int reg_num)
 			return ERROR_OK;
 		}
 	}
-
-	free(reg_list);
-
-	return ERROR_FAIL;
+	return ERROR_NOT_IMPLEMENTED;
 }
 
 /** Return a list of general registers. */
@@ -810,19 +843,14 @@ int rtos_generic_stack_write_reg(struct target *target,
 	return ERROR_OK;
 }
 
-struct rtos *rtos_of_target(struct target *target)
+struct rtos *rtos_from_target(struct target *target)
 {
-	/* Primarily consider the rtos field of the target itself, secondarily consider
-	 * rtos field SMP leader target, then consider rtos field of any other target in the SMP group.
-	 * Otherwise NULL return means that no associated non-zero rtos field could be found. */
-
-	struct target_list *pos;
-
-	if ((target->rtos) && (target->rtos->type))
+	if (target->rtos && target->rtos->type)
 		return target->rtos;
 
+	struct target_list *pos;
 	foreach_smp_target(pos, target->smp_targets)
-		if ((pos->target->rtos) && (pos->target->rtos->type))
+		if (pos->target->rtos && pos->target->rtos->type)
 			return pos->target->rtos;
 
 	return NULL;
@@ -830,7 +858,7 @@ struct rtos *rtos_of_target(struct target *target)
 
 int rtos_update_threads(struct target *target)
 {
-	struct rtos *rtos = rtos_of_target(target);
+	struct rtos *rtos = rtos_from_target(target);
 	if (rtos)
 		rtos->type->update_threads(rtos);
 	return ERROR_OK;
@@ -854,13 +882,6 @@ void rtos_free_threadlist(struct rtos *rtos)
 	}
 }
 
-bool rtos_needs_fake_step(struct target *target, int64_t thread_id)
-{
-	if (target->rtos->type->needs_fake_step)
-		return target->rtos->type->needs_fake_step(target, thread_id);
-	return target->rtos->current_thread != thread_id;
-}
-
 int rtos_read_buffer(struct target *target, target_addr_t address,
 		uint32_t size, uint8_t *buffer)
 {
@@ -875,6 +896,13 @@ int rtos_write_buffer(struct target *target, target_addr_t address,
 	if (target->rtos->type->write_buffer)
 		return target->rtos->type->write_buffer(target->rtos, address, size, buffer);
 	return ERROR_NOT_IMPLEMENTED;
+}
+
+bool rtos_needs_fake_step(struct target *target, int64_t thread_id)
+{
+	if (target->rtos->type->needs_fake_step)
+		return target->rtos->type->needs_fake_step(target, thread_id);
+	return target->rtos->current_thread != thread_id;
 }
 
 struct target *rtos_swbp_target(struct target *target, target_addr_t address,

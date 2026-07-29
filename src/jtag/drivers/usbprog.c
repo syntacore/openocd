@@ -124,8 +124,10 @@ static int usbprog_execute_queue(struct jtag_command *cmd_queue)
 			scan_size = jtag_build_buffer(cmd->cmd.scan, &buffer);
 			type = jtag_scan_type(cmd->cmd.scan);
 			usbprog_scan(cmd->cmd.scan->ir_scan, type, buffer, scan_size);
-			if (jtag_read_buffer(buffer, cmd->cmd.scan) != ERROR_OK)
+			if (jtag_read_buffer(buffer, cmd->cmd.scan) != ERROR_OK) {
+				free(buffer);
 				return ERROR_JTAG_QUEUE_FAILED;
+			}
 			free(buffer);
 			break;
 		case JTAG_SLEEP:
@@ -274,18 +276,18 @@ static void usbprog_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int
 
 	void (*f)(struct usbprog_jtag *usbprog_jtag, char *buffer_local, int size);
 	switch (type) {
-		case SCAN_OUT:
-			f = &usbprog_jtag_write_tdi;
-			break;
-		case SCAN_IN:
-			f = &usbprog_jtag_read_tdo;
-			break;
-		case SCAN_IO:
-			f = &usbprog_jtag_write_and_read;
-			break;
-		default:
-			LOG_ERROR("unknown scan type: %i", type);
-			exit(-1);
+	case SCAN_OUT:
+		f = &usbprog_jtag_write_tdi;
+		break;
+	case SCAN_IN:
+		f = &usbprog_jtag_read_tdo;
+		break;
+	case SCAN_IO:
+		f = &usbprog_jtag_write_and_read;
+		break;
+	default:
+		LOG_ERROR("unknown scan type: %i", type);
+		exit(-1);
 	}
 	f(usbprog_jtag_handle, (char *)buffer, scan_size);
 

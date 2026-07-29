@@ -281,7 +281,7 @@ static int scr5_virt2phys(struct target *target, target_addr_t virt_addr,
 		return riscv_virt2phys(target, virt_addr, phys_addr);
 	}
 
-	int mmu_enabled;
+	bool mmu_enabled;
 	int res = riscv_mmu(target, &mmu_enabled);
 	if (res != ERROR_OK)
 		return res;

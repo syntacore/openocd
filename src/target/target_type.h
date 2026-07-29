@@ -16,6 +16,7 @@
 
 #include <helper/jim-nvp.h>
 
+struct command_invocation;
 struct target;
 
 /**
@@ -112,6 +113,12 @@ struct target_type {
 	*/
 
 	/**
+	 * Returns true if target memory is read to read/write.
+	 * Do @b not call this function
+	 * directly, use target_memory_ready() instead.
+	 */
+	bool (*memory_ready)(struct target *target);
+	/**
 	 * Target memory read callback.  Do @b not call this function
 	 * directly, use target_read_memory() instead.
 	 */
@@ -135,8 +142,8 @@ struct target_type {
 	int (*checksum_memory)(struct target *target, target_addr_t address,
 			uint32_t count, uint32_t *checksum);
 	int (*blank_check_memory)(struct target *target,
-			struct target_memory_check_block *blocks, int num_blocks,
-			uint8_t erased_value);
+			struct target_memory_check_block *blocks, unsigned int num_blocks,
+			uint8_t erased_value, unsigned int *checked);
 
 	/*
 	 * target break-/watchpoint control
@@ -201,10 +208,6 @@ struct target_type {
 	/* otherwise: JIM_OK, or JIM_ERR, */
 	int (*target_jim_configure)(struct target *target, struct jim_getopt_info *goi);
 
-	/* target commands specifically handled by the target */
-	/* returns JIM_OK, or JIM_ERR, or JIM_CONTINUE - if option not understood */
-	int (*target_jim_commands)(struct target *target, struct jim_getopt_info *goi);
-
 	/**
 	 * This method is used to perform target setup that requires
 	 * JTAG access.
@@ -268,7 +271,7 @@ struct target_type {
 	int (*write_phys_memory)(struct target *target, target_addr_t phys_address,
 			uint32_t size, uint32_t count, const uint8_t *buffer);
 
-	int (*mmu)(struct target *target, int *enabled);
+	int (*mmu)(struct target *target, bool *enabled);
 
 	/* after reset is complete, the target can check if things are properly set up.
 	 *
@@ -309,8 +312,20 @@ struct target_type {
 	 * will typically be 32 for 32-bit targets, and 64 for 64-bit targets. If
 	 * not implemented, it's assumed to be 32. */
 	unsigned int (*data_bits)(struct target *target);
+
+	/*
+	 * Reports the instruction set in execution on the CPU.
+	 * The returned string should be statically allocated, no free() required.
+	 * The strings should be the same used by Capstone 'cstool' command line
+	 * parameter <arch+mode>.
+	 * Returns ERROR_OK or an error code if the current instruction set cannot
+	 * be determined.
+	 */
+	int (*insn_set)(struct command_invocation *cmd, struct target *target,
+					const char **insn_set);
 };
 
+// Keep in alphabetic order this list of targets
 extern struct target_type aarch64_target;
 extern struct target_type arcv2_target;
 extern struct target_type arm11_target;

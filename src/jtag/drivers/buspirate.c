@@ -941,24 +941,24 @@ static void buspirate_swd_set_feature(int fd, char feat, char action)
 	uint8_t tmp[1];
 
 	switch (feat) {
-		case FEATURE_TRST:
-			LOG_DEBUG("Buspirate TRST feature not available in SWD mode");
-			return;
-		case FEATURE_LED:
-			LOG_ERROR("Buspirate LED feature not available in SWD mode");
-			return;
-		case FEATURE_SRST:
-			swd_features = (action == ACTION_ENABLE) ? swd_features | 0x02 : swd_features & 0x0D;
-			break;
-		case FEATURE_PULLUP:
-			swd_features = (action == ACTION_ENABLE) ? swd_features | 0x04 : swd_features & 0x0B;
-			break;
-		case FEATURE_VREG:
-			swd_features = (action == ACTION_ENABLE) ? swd_features | 0x08 : swd_features & 0x07;
-			break;
-		default:
-			LOG_DEBUG("Buspirate unknown feature %d", feat);
-			return;
+	case FEATURE_TRST:
+		LOG_DEBUG("Buspirate TRST feature not available in SWD mode");
+		return;
+	case FEATURE_LED:
+		LOG_ERROR("Buspirate LED feature not available in SWD mode");
+		return;
+	case FEATURE_SRST:
+		swd_features = (action == ACTION_ENABLE) ? swd_features | 0x02 : swd_features & 0x0D;
+		break;
+	case FEATURE_PULLUP:
+		swd_features = (action == ACTION_ENABLE) ? swd_features | 0x04 : swd_features & 0x0B;
+		break;
+	case FEATURE_VREG:
+		swd_features = (action == ACTION_ENABLE) ? swd_features | 0x08 : swd_features & 0x07;
+		break;
+	default:
+		LOG_DEBUG("Buspirate unknown feature %d", feat);
+		return;
 	}
 
 	tmp[0] = CMD_RAW_PERIPH | swd_features;
@@ -1157,9 +1157,7 @@ static unsigned char buspirate_jtag_command(int fd,
 /* TODO add support for WIN32 and others ! */
 static int buspirate_serial_open(char *port)
 {
-	int fd;
-	fd = open(buspirate_port, O_RDWR | O_NOCTTY | O_NDELAY);
-	return fd;
+	return open(buspirate_port, O_RDWR | O_NOCTTY | O_NDELAY);
 }
 
 

@@ -237,8 +237,7 @@ static int psoc5lp_get_device_id(struct target *target, uint32_t *id)
 	retval = target_read_u32(target, PANTHER_DEVICE_ID, id); /* dummy read */
 	if (retval != ERROR_OK)
 		return retval;
-	retval = target_read_u32(target, PANTHER_DEVICE_ID, id);
-	return retval;
+	return target_read_u32(target, PANTHER_DEVICE_ID, id);
 }
 
 static int psoc5lp_find_device(struct target *target,
@@ -297,8 +296,7 @@ static int psoc5lp_spc_write_opcode(struct target *target, uint8_t opcode)
 	retval = target_write_u8(target, SPC_CPU_DATA, SPC_KEY2 + opcode);
 	if (retval != ERROR_OK)
 		return retval;
-	retval = target_write_u8(target, SPC_CPU_DATA, opcode);
-	return retval;
+	return target_write_u8(target, SPC_CPU_DATA, opcode);
 }
 
 static void psoc5lp_spc_write_opcode_buffer(struct target *target,
@@ -1081,17 +1079,18 @@ static int psoc5lp_erase_check(struct flash_bank *bank)
 
 	bool fast_check = true;
 	for (unsigned int i = 0; i < num_sectors; ) {
+		unsigned int checked;
 		retval = armv7m_blank_check_memory(target,
 					block_array + i, num_sectors - i,
-					bank->erased_value);
-		if (retval < 1) {
+					bank->erased_value, &checked);
+		if (retval != ERROR_OK) {
 			/* Run slow fallback if the first run gives no result
 			 * otherwise use possibly incomplete results */
 			if (i == 0)
 				fast_check = false;
 			break;
 		}
-		i += retval; /* add number of blocks done this round */
+		i += checked; /* add number of blocks done this round */
 	}
 
 	if (fast_check) {
