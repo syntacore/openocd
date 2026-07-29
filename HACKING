@@ -77,32 +77,6 @@ patch:
   src/openocd -s ../tcl -f /path/to/openocd.cfg
   @endcode
 
-- Runtime coverage testing
-
-  Apply the following patch to prevent OpenOCD from killing itself:
-  @code
---- a/src/openocd.c
-+++ b/src/openocd.c
-@@ -372,8 +372,6 @@ int openocd_main(int argc, char *argv[])
-
-        if (ERROR_FAIL == ret)
-                return EXIT_FAILURE;
--       else if (ERROR_OK != ret)
--               exit_on_signal(ret);
-
-        return ret;
- }
-  @endcode
-
-  Configure your OpenOCD binary with coverage support as follows:
-  @code
-  LDFLAGS="-fprofile-arcs -ftest-coverage"
-		   CFLAGS="-fprofile-arcs -ftest-coverage" ./configure
-  @endcode
-
-  Now every time OpenOCD is run, coverage info in your build directory is
-  updated. Running `gcov src/path/file.c` will generate a report.
-
 - Sparse Static Analyzer
 
   Using this tool allows identifying some bug in C code.
