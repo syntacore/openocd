@@ -1759,6 +1759,9 @@ dw_spi_probe(struct flash_bank *bank)
 	if (!strcmp(bank->target->type->name, riscv_target.name)
 		&& target_address_bits(bank->target) == 64)
 		driver->target = DW_SPI_TARGET_RISCV64;
+	if (!strcmp(bank->target->type->name, scr5_target.name)
+		&& target_address_bits(bank->target) == 64)
+		driver->target = DW_SPI_TARGET_RISCV64;
 	if (driver->target == DW_SPI_TARGET_MAX) {
 		LOG_ERROR("DW SPI currently does not support target %s",
 				  bank->target->type->name);
