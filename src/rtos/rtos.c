@@ -44,9 +44,7 @@ int rtos_smp_init(struct target *target)
 	return ERROR_TARGET_INIT_FAILED;
 }
 
-static int rtos_target_for_threadid(struct connection *connection,
-									threadid_t threadid,
-									struct target **t)
+static int rtos_target_for_threadid(struct connection *connection, int64_t threadid, struct target **t)
 {
 	struct target *curr = get_target_from_connection(connection);
 	if (t)
@@ -55,8 +53,7 @@ static int rtos_target_for_threadid(struct connection *connection,
 	return ERROR_OK;
 }
 
-static int os_alloc(struct target *target, const struct rtos_type *ostype,
-					struct command_context *cmd_ctx)
+static int os_alloc(struct target *target, const struct rtos_type *ostype)
 {
 	struct rtos *os = target->rtos = calloc(1, sizeof(struct rtos));
 
@@ -72,7 +69,6 @@ static int os_alloc(struct target *target, const struct rtos_type *ostype,
 	/* RTOS drivers can override the packet handler in _create(). */
 	os->gdb_thread_packet = rtos_thread_packet;
 	os->gdb_target_for_threadid = rtos_target_for_threadid;
-	os->cmd_ctx = cmd_ctx;
 
 	return ERROR_OK;
 }
@@ -88,10 +84,9 @@ static void os_free(struct target *target)
 	target->rtos = NULL;
 }
 
-static int os_alloc_create(struct target *target, const struct rtos_type *ostype,
-						   struct command_context *cmd_ctx)
+static int os_alloc_create(struct target *target, const struct rtos_type *ostype)
 {
-	int ret = os_alloc(target, ostype, cmd_ctx);
+	int ret = os_alloc(target, ostype);
 	if (ret != ERROR_OK)
 		return ret;
 
@@ -119,12 +114,12 @@ int rtos_create(struct command_invocation *cmd, struct target *target,
 
 		/* rtos_qsymbol() will iterate over all RTOSes. Allocate
 		 * target->rtos here, and set it to the first RTOS type. */
-		return os_alloc(target, rtos_types[0], CMD_CTX);
+		return os_alloc(target, rtos_types[0]);
 	}
 
 	for (size_t x = 0; x < ARRAY_SIZE(rtos_types); x++)
 		if (strcmp(rtos_name, rtos_types[x]->name) == 0)
-			return os_alloc_create(target, rtos_types[x], CMD_CTX);
+			return os_alloc_create(target, rtos_types[x]);
 
 	char *all = NULL;
 	for (size_t x = 0; x < ARRAY_SIZE(rtos_types); x++) {
@@ -556,14 +551,13 @@ static int rtos_put_gdb_reg_list(struct connection *connection,
 int rtos_get_gdb_reg(struct connection *connection, int reg_num)
 {
 	struct target *target = get_target_from_connection(connection);
-	threadid_t current_threadid = target->rtos->current_threadid;
-	if (!target->rtos ||
-			current_threadid == -1 ||
-			current_threadid == 0 ||
-			(current_threadid == target->rtos->current_thread &&
-			 !target->smp)) { /* in smp several current thread are possible */
-		return ERROR_NOT_IMPLEMENTED;
-	}
+	int64_t current_threadid = target->rtos->current_threadid;
+	if ((target->rtos) && (current_threadid != -1) &&
+			(current_threadid != 0) &&
+			((current_threadid != target->rtos->current_thread) ||
+			(target->smp))) {	/* in smp several current thread are possible */
+		struct rtos_reg *reg_list;
+		int num_regs;
 
 		LOG_DEBUG("getting register %d for thread 0x%" PRIx64
 				  ", target->rtos->current_thread=0x%" PRIx64,
@@ -597,40 +591,15 @@ int rtos_get_gdb_reg(struct connection *connection, int reg_num)
 			return retval;
 		}
 
-		/* Create a reg_list with one register that can
-		 * accommodate the full size of the one we just got the
-		 * value for. To do that we allocate extra space off the
-		 * end of the struct, relying on the fact that
-		 * rtos_reg.value is the last element in the struct. */
-		reg_list = calloc(1, sizeof(*reg_list) + DIV_ROUND_UP(reg_size, 8));
-		if (!reg_list) {
-			free(reg_value);
-			LOG_ERROR("Failed to allocated reg_list for %d-byte register.",
-					reg_size);
-			return ERROR_FAIL;
+		for (int i = 0; i < num_regs; ++i) {
+			if (reg_list[i].number == (uint32_t)reg_num) {
+				rtos_put_gdb_reg_list(connection, reg_list + i, 1);
+				free(reg_list);
+				return ERROR_OK;
+			}
 		}
-		reg_list[0].number = reg_num;
-		reg_list[0].size = reg_size;
-		memcpy(&reg_list[0].value, reg_value, DIV_ROUND_UP(reg_size, 8));
-		free(reg_value);
-		num_regs = 1;
-	} else {
-		retval = target->rtos->type->get_thread_reg_list(target->rtos,
-				current_threadid,
-				&reg_list,
-				&num_regs);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("RTOS: failed to get register list");
-			return retval;
-		}
-	}
 
-	for (int i = 0; i < num_regs; ++i) {
-		if (reg_list[i].number == (uint32_t)reg_num) {
-			rtos_put_gdb_reg_list(connection, reg_list + i, 1);
-			free(reg_list);
-			return ERROR_OK;
-		}
+		free(reg_list);
 	}
 	return ERROR_NOT_IMPLEMENTED;
 }
@@ -647,9 +616,10 @@ int rtos_get_gdb_reg_list(struct connection *connection)
 		struct rtos_reg *reg_list;
 		int num_regs;
 
-		LOG_TARGET_DEBUG(target, "RTOS: getting register list for thread 0x%" PRIx64
-			  ", target->rtos->current_thread=0x%" PRIx64,
-			  current_threadid, target->rtos->current_thread);
+		LOG_DEBUG("RTOS: getting register list for thread 0x%" PRIx64
+				  ", target->rtos->current_thread=0x%" PRIx64 "\r\n",
+										current_threadid,
+										target->rtos->current_thread);
 
 		int retval = target->rtos->type->get_thread_reg_list(target->rtos,
 				current_threadid,
@@ -684,7 +654,7 @@ int rtos_set_reg(struct connection *connection, int reg_num,
 
 int rtos_generic_stack_read(struct target *target,
 	const struct rtos_register_stacking *stacking,
-	target_addr_t stack_ptr,
+	int64_t stack_ptr,
 	struct rtos_reg **reg_list,
 	int *num_regs)
 {
@@ -696,7 +666,7 @@ int rtos_generic_stack_read(struct target *target,
 	}
 	/* Read the stack */
 	uint8_t *stack_data = malloc(stacking->stack_registers_size);
-	target_addr_t address = stack_ptr;
+	uint32_t address = stack_ptr;
 
 	if (stacking->stack_growth_direction == 1)
 		address -= stacking->stack_registers_size;
@@ -709,7 +679,7 @@ int rtos_generic_stack_read(struct target *target,
 		LOG_ERROR("Error reading stack frame from thread");
 		return retval;
 	}
-	LOG_DEBUG("RTOS: Read stack frame at " TARGET_ADDR_FMT, address);
+	LOG_DEBUG("RTOS: Read stack frame at 0x%" PRIx32, address);
 
 #if 0
 		LOG_OUTPUT("Stack Data :");
@@ -739,107 +709,10 @@ int rtos_generic_stack_read(struct target *target,
 			buf_cpy(&new_stack_ptr, (*reg_list)[i].value, (*reg_list)[i].size);
 		else if (offset != -1)
 			buf_cpy(stack_data + offset, (*reg_list)[i].value, (*reg_list)[i].size);
-
-		LOG_DEBUG("register %d has value 0x%" PRIx64, (*reg_list)[i].number,
-				  buf_get_u64((*reg_list)[i].value, 0, 64));
 	}
 
 	free(stack_data);
 /*	LOG_OUTPUT("Output register string: %s\r\n", *hex_reg_list); */
-	return ERROR_OK;
-}
-
-/* Read an individual register from the RTOS stack. */
-int rtos_generic_stack_read_reg(struct target *target,
-								const struct rtos_register_stacking *stacking,
-								target_addr_t stack_ptr,
-								uint32_t reg_num, struct rtos_reg *reg)
-{
-	LOG_DEBUG("stack_ptr=" TARGET_ADDR_FMT ", reg_num=%d", stack_ptr, reg_num);
-	unsigned total_count = MAX(stacking->total_register_count, stacking->num_output_registers);
-	unsigned i;
-	for (i = 0; i < total_count; i++) {
-		if (stacking->register_offsets[i].number == reg_num)
-			break;
-	}
-	if (i >= total_count) {
-		/* This register is not on the stack. Return error so a caller somewhere
-		 * will just read the register directly from the target. */
-		return ERROR_FAIL;
-	}
-
-	const struct stack_register_offset *offsets = &stacking->register_offsets[i];
-	reg->size = offsets->width_bits;
-
-	unsigned width_bytes = DIV_ROUND_UP(offsets->width_bits, 8);
-	if (offsets->offset >= 0) {
-		target_addr_t address = stack_ptr;
-
-		if (stacking->stack_growth_direction == 1)
-			address -= stacking->stack_registers_size;
-
-		if (target_read_buffer(
-				target, address + offsets->offset,
-				width_bytes, reg->value) != ERROR_OK)
-			return ERROR_FAIL;
-		LOG_DEBUG("register %d has value 0x%" PRIx64, reg->number,
-				  buf_get_u64(reg->value, 0, 64));
-	} else {
-		memset(reg->value, 0, width_bytes);
-	}
-
-	return ERROR_OK;
-}
-
-int rtos_generic_stack_write_reg(struct target *target,
-								const struct rtos_register_stacking *stacking,
-								target_addr_t stack_ptr,
-								uint32_t reg_num, uint8_t *reg_value)
-{
-	LOG_DEBUG("stack_ptr=" TARGET_ADDR_FMT ", reg_num=%d", stack_ptr, reg_num);
-	unsigned total_count = MAX(stacking->total_register_count, stacking->num_output_registers);
-	unsigned i;
-	for (i = 0; i < total_count; i++) {
-		if (stacking->register_offsets[i].number == reg_num)
-			break;
-	}
-	if (i >= total_count) {
-		/* This register is not on the stack. Return error so a caller somewhere
-		 * will just read the register directly from the target. */
-		return ERROR_FAIL;
-	}
-
-	const struct stack_register_offset *offsets = &stacking->register_offsets[i];
-
-	unsigned width_bytes = DIV_ROUND_UP(offsets->width_bits, 8);
-	if (offsets->offset >= 0) {
-		target_addr_t address = stack_ptr;
-
-		if (stacking->stack_growth_direction == 1)
-			address -= stacking->stack_registers_size;
-
-		LOG_DEBUG("write 0x%" PRIx64 " to register %d",
-				  buf_get_u64(reg_value, 0, offsets->width_bits), reg_num);
-		if (target_write_buffer(
-				target, address + offsets->offset,
-				width_bytes, reg_value) != ERROR_OK)
-			return ERROR_FAIL;
-	} else if (offsets->offset == -1) {
-		/* This register isn't on the stack, but is listed as one of those. We
-		 * read it as 0, and ignore writes. */
-	} else if (offsets->offset == -2) {
-		/* This register requires computation when we "read" it. I'm not sure
-		 * how to handle writes. We can't simply return error here because then
-		 * the higher level code will end up writing the register in the halted
-		 * core, which is definitely not the same as writing it for a thread. */
-		LOG_ERROR("Don't know how to write register %d with offset -2 in a thread.",
-				  reg_num);
-		assert(0);
-	} else {
-		LOG_ERROR("Don't know how to handle offset <2.");
-		assert(0);
-	}
-
 	return ERROR_OK;
 }
 
