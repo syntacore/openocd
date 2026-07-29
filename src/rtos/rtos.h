@@ -165,15 +165,20 @@ void rtos_free_threadlist(struct rtos *rtos);
 int rtos_smp_init(struct target *target);
 /*  function for handling symbol access */
 int rtos_qsymbol(struct connection *connection, char const *packet, int packet_size);
-bool rtos_needs_fake_step(struct target *target, threadid_t thread_id);
 int rtos_read_buffer(struct target *target, target_addr_t address,
 		uint32_t size, uint8_t *buffer);
 int rtos_write_buffer(struct target *target, target_addr_t address,
 		uint32_t size, const uint8_t *buffer);
+bool rtos_needs_fake_step(struct target *target, int64_t thread_id);
 struct target *rtos_swbp_target(struct target *target, target_addr_t address,
 				uint32_t length, enum breakpoint_type type);
-struct rtos *rtos_of_target(struct target *target);
+/**
+ * Get the RTOS from the target itself, or from one of the targets in
+ * the same SMP node, or NULL when no RTOS is set.
+ */
+struct rtos *rtos_from_target(struct target *target);
 
+// Keep in alphabetic order this list of rtos
 extern const struct rtos_type chibios_rtos;
 extern const struct rtos_type chromium_ec_rtos;
 extern const struct rtos_type ecos_rtos;

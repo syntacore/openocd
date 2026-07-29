@@ -231,12 +231,12 @@ struct xmc4xxx_command_seq {
 };
 
 /* Sector capacities.  See section 8 of xmc4x00_rm */
-static const unsigned int sector_capacity_8[8] = {
-	16, 16, 16, 16, 16, 16, 16, 128
+static const unsigned int sector_capacity_9[9] = {
+	16, 16, 16, 16, 16, 16, 16, 16, 128
 };
 
-static const unsigned int sector_capacity_9[9] = {
-	16, 16, 16, 16, 16, 16, 16, 128, 256
+static const unsigned int sector_capacity_10[10] = {
+	16, 16, 16, 16, 16, 16, 16, 16, 128, 256
 };
 
 static const unsigned int sector_capacity_12[12] = {
@@ -272,11 +272,11 @@ static int xmc4xxx_load_bank_layout(struct flash_bank *bank)
 	LOG_DEBUG("%u sectors", bank->num_sectors);
 
 	switch (bank->num_sectors) {
-	case 8:
-		capacity = sector_capacity_8;
-		break;
 	case 9:
 		capacity = sector_capacity_9;
+		break;
+	case 10:
+		capacity = sector_capacity_10;
 		break;
 	case 12:
 		capacity = sector_capacity_12;
@@ -361,11 +361,11 @@ static int xmc4xxx_probe(struct flash_bank *bank)
 	 * we understand the type of controller we're dealing with */
 	switch (flash_id) {
 	case FLASH_ID_XMC4100_4200:
-		bank->num_sectors = 8;
+		bank->num_sectors = 9;
 		LOG_DEBUG("XMC4xxx: XMC4100/4200 detected.");
 		break;
 	case FLASH_ID_XMC4400:
-		bank->num_sectors = 9;
+		bank->num_sectors = 10;
 		LOG_DEBUG("XMC4xxx: XMC4400 detected.");
 		break;
 	case FLASH_ID_XMC4500:
@@ -522,9 +522,7 @@ static int xmc4xxx_erase_sector(struct flash_bank *bank, uint32_t address,
 	}
 
 	/* Now we must wait for the erase operation to end */
-	res = xmc4xxx_wait_status_busy(bank, FLASH_OP_TIMEOUT);
-
-	return res;
+	return xmc4xxx_wait_status_busy(bank, FLASH_OP_TIMEOUT);
 }
 
 static int xmc4xxx_erase(struct flash_bank *bank, unsigned int first,
@@ -569,8 +567,7 @@ static int xmc4xxx_erase(struct flash_bank *bank, unsigned int first,
 	}
 
 clear_status_and_exit:
-	res = xmc4xxx_clear_flash_status(bank);
-	return res;
+	return xmc4xxx_clear_flash_status(bank);
 
 }
 
@@ -1131,7 +1128,6 @@ static int xmc4xxx_flash_protect(struct flash_bank *bank, int level, bool read_p
 static int xmc4xxx_protect(struct flash_bank *bank, int set, unsigned int first,
 		unsigned int last)
 {
-	int ret;
 	struct xmc4xxx_flash_bank *fb = bank->driver_priv;
 
 	/* Check for flash passwords */
@@ -1144,14 +1140,11 @@ static int xmc4xxx_protect(struct flash_bank *bank, int set, unsigned int first,
 	if (set == 0) {
 		LOG_WARNING("Flash protection will be temporarily disabled"
 			    " for all pages (User 0 only)!");
-		ret = xmc4xxx_temp_unprotect(bank, 0);
-		return ret;
+		return xmc4xxx_temp_unprotect(bank, 0);
 	}
 
 	/* Install write protection for user 0 on the specified pages */
-	ret = xmc4xxx_flash_protect(bank, 0, false, first, last);
-
-	return ret;
+	return xmc4xxx_flash_protect(bank, 0, false, first, last);
 }
 
 static int xmc4xxx_protect_check(struct flash_bank *bank)
@@ -1290,9 +1283,7 @@ COMMAND_HANDLER(xmc4xxx_handle_flash_unprotect_command)
 
 	COMMAND_PARSE_NUMBER(s32, CMD_ARGV[1], level);
 
-	res = xmc4xxx_flash_unprotect(bank, level);
-
-	return res;
+	return xmc4xxx_flash_unprotect(bank, level);
 }
 
 static const struct command_registration xmc4xxx_exec_command_handlers[] = {

@@ -58,8 +58,10 @@
 
 #define FT232R_BUF_SIZE_EXTRA	4096
 
-static uint16_t ft232r_vid = 0x0403; /* FTDI */
-static uint16_t ft232r_pid = 0x6001; /* FT232R */
+// Default VID/PID pair for FTDI FT232R.
+static uint16_t ft232r_vids[] = {0x0403, 0};
+static uint16_t ft232r_pids[] = {0x6001, 0};
+
 static struct libusb_device_handle *adapter;
 
 static uint8_t *ft232r_output;
@@ -244,12 +246,24 @@ static int ft232r_speed(int divisor)
 
 static int ft232r_init(void)
 {
-	uint16_t avids[] = {ft232r_vid, 0};
-	uint16_t apids[] = {ft232r_pid, 0};
-	if (jtag_libusb_open(avids, apids, NULL, &adapter, NULL)) {
+	const uint16_t *vids = ft232r_vids;
+	const uint16_t *pids = ft232r_pids;
+
+	if (adapter_usb_get_vids()[0] != 0) {
+		vids = adapter_usb_get_vids();
+		pids = adapter_usb_get_pids();
+	}
+
+	if (jtag_libusb_open(vids, pids, NULL, &adapter, NULL)) {
+		char usb_vid_pid_str[256] = {0};
+		for (unsigned int i = 0; vids[i] != 0; i++)
+			snprintf(usb_vid_pid_str + strlen(usb_vid_pid_str),
+				sizeof(usb_vid_pid_str) - strlen(usb_vid_pid_str),
+				"%04x:%04x ", vids[i], pids[i]);
+
 		const char *ft232r_serial_desc = adapter_get_required_serial();
-		LOG_ERROR("ft232r not found: vid=%04x, pid=%04x, serial=%s\n",
-			ft232r_vid, ft232r_pid, (!ft232r_serial_desc) ? "[any]" : ft232r_serial_desc);
+		LOG_ERROR("ft232r not found: serial=%s, vid/pid=%s\n",
+			(!ft232r_serial_desc) ? "[any]" : ft232r_serial_desc, usb_vid_pid_str);
 		return ERROR_JTAG_INIT_FAILED;
 	}
 
@@ -383,22 +397,6 @@ static int ft232r_bit_name_to_number(const char *name)
 		if (strcasecmp(name, ft232r_bit_name_array[i]) == 0)
 			return i;
 	return -1;
-}
-
-COMMAND_HANDLER(ft232r_handle_vid_pid_command)
-{
-	if (CMD_ARGC > 2) {
-		LOG_WARNING("ignoring extra IDs in ft232r_vid_pid "
-					"(maximum is 1 pair)");
-		CMD_ARGC = 2;
-	}
-	if (CMD_ARGC == 2) {
-		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[0], ft232r_vid);
-		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[1], ft232r_pid);
-	} else
-		LOG_WARNING("incomplete ft232r_vid_pid configuration");
-
-	return ERROR_OK;
 }
 
 COMMAND_HANDLER(ft232r_handle_jtag_nums_command)
@@ -541,13 +539,6 @@ COMMAND_HANDLER(ft232r_handle_restore_serial_command)
 }
 
 static const struct command_registration ft232r_subcommand_handlers[] = {
-	{
-		.name = "vid_pid",
-		.handler = ft232r_handle_vid_pid_command,
-		.mode = COMMAND_CONFIG,
-		.help = "USB VID and PID of the adapter",
-		.usage = "vid pid",
-	},
 	{
 		.name = "jtag_nums",
 		.handler = ft232r_handle_jtag_nums_command,
@@ -818,71 +809,71 @@ static int syncbb_execute_queue(struct jtag_command *cmd_queue)
 
 	while (cmd) {
 		switch (cmd->type) {
-			case JTAG_RESET:
-				LOG_DEBUG_IO("reset trst: %i srst %i", cmd->cmd.reset->trst, cmd->cmd.reset->srst);
+		case JTAG_RESET:
+			LOG_DEBUG_IO("reset trst: %i srst %i", cmd->cmd.reset->trst, cmd->cmd.reset->srst);
 
-				if ((cmd->cmd.reset->trst == 1) ||
+			if (cmd->cmd.reset->trst == 1 ||
 					(cmd->cmd.reset->srst &&
-					(jtag_get_reset_config() & RESET_SRST_PULLS_TRST))) {
-					tap_set_state(TAP_RESET);
-				}
-				ft232r_reset(cmd->cmd.reset->trst, cmd->cmd.reset->srst);
-				break;
+					 (jtag_get_reset_config() & RESET_SRST_PULLS_TRST)))
+				tap_set_state(TAP_RESET);
 
-			case JTAG_RUNTEST:
-				LOG_DEBUG_IO("runtest %u cycles, end in %s", cmd->cmd.runtest->num_cycles,
-					tap_state_name(cmd->cmd.runtest->end_state));
+			ft232r_reset(cmd->cmd.reset->trst, cmd->cmd.reset->srst);
+			break;
 
-				syncbb_end_state(cmd->cmd.runtest->end_state);
-				syncbb_runtest(cmd->cmd.runtest->num_cycles);
-				break;
+		case JTAG_RUNTEST:
+			LOG_DEBUG_IO("runtest %u cycles, end in %s", cmd->cmd.runtest->num_cycles,
+				tap_state_name(cmd->cmd.runtest->end_state));
 
-			case JTAG_STABLECLOCKS:
-				/* this is only allowed while in a stable state.  A check for a stable
-				 * state was done in jtag_add_clocks()
-				 */
-				syncbb_stableclocks(cmd->cmd.stableclocks->num_cycles);
-				break;
+			syncbb_end_state(cmd->cmd.runtest->end_state);
+			syncbb_runtest(cmd->cmd.runtest->num_cycles);
+			break;
 
-			case JTAG_TLR_RESET: /* renamed from JTAG_STATEMOVE */
-				LOG_DEBUG_IO("statemove end in %s", tap_state_name(cmd->cmd.statemove->end_state));
+		case JTAG_STABLECLOCKS:
+			/* this is only allowed while in a stable state.  A check for a stable
+			 * state was done in jtag_add_clocks()
+			 */
+			syncbb_stableclocks(cmd->cmd.stableclocks->num_cycles);
+			break;
 
-				syncbb_end_state(cmd->cmd.statemove->end_state);
-				syncbb_state_move(0);
-				break;
+		case JTAG_TLR_RESET: /* renamed from JTAG_STATEMOVE */
+			LOG_DEBUG_IO("statemove end in %s", tap_state_name(cmd->cmd.statemove->end_state));
 
-			case JTAG_PATHMOVE:
-				LOG_DEBUG_IO("pathmove: %u states, end in %s", cmd->cmd.pathmove->num_states,
-					tap_state_name(cmd->cmd.pathmove->path[cmd->cmd.pathmove->num_states - 1]));
+			syncbb_end_state(cmd->cmd.statemove->end_state);
+			syncbb_state_move(0);
+			break;
 
-				syncbb_path_move(cmd->cmd.pathmove);
-				break;
+		case JTAG_PATHMOVE:
+			LOG_DEBUG_IO("pathmove: %u states, end in %s", cmd->cmd.pathmove->num_states,
+				tap_state_name(cmd->cmd.pathmove->path[cmd->cmd.pathmove->num_states - 1]));
 
-			case JTAG_SCAN:
-				LOG_DEBUG_IO("%s scan end in %s",  (cmd->cmd.scan->ir_scan) ? "IR" : "DR",
-					tap_state_name(cmd->cmd.scan->end_state));
+			syncbb_path_move(cmd->cmd.pathmove);
+			break;
 
-				syncbb_end_state(cmd->cmd.scan->end_state);
-				scan_size = jtag_build_buffer(cmd->cmd.scan, &buffer);
-				type = jtag_scan_type(cmd->cmd.scan);
-				syncbb_scan(cmd->cmd.scan->ir_scan, type, buffer, scan_size);
-				if (jtag_read_buffer(buffer, cmd->cmd.scan) != ERROR_OK)
-					retval = ERROR_JTAG_QUEUE_FAILED;
-				free(buffer);
-				break;
+		case JTAG_SCAN:
+			LOG_DEBUG_IO("%s scan end in %s",  (cmd->cmd.scan->ir_scan) ? "IR" : "DR",
+				tap_state_name(cmd->cmd.scan->end_state));
 
-			case JTAG_SLEEP:
-				LOG_DEBUG_IO("sleep %" PRIu32, cmd->cmd.sleep->us);
+			syncbb_end_state(cmd->cmd.scan->end_state);
+			scan_size = jtag_build_buffer(cmd->cmd.scan, &buffer);
+			type = jtag_scan_type(cmd->cmd.scan);
+			syncbb_scan(cmd->cmd.scan->ir_scan, type, buffer, scan_size);
+			if (jtag_read_buffer(buffer, cmd->cmd.scan) != ERROR_OK)
+				retval = ERROR_JTAG_QUEUE_FAILED;
+			free(buffer);
+			break;
 
-				jtag_sleep(cmd->cmd.sleep->us);
-				break;
+		case JTAG_SLEEP:
+			LOG_DEBUG_IO("sleep %" PRIu32, cmd->cmd.sleep->us);
 
-			case JTAG_TMS:
-				retval = syncbb_execute_tms(cmd);
-				break;
-			default:
-				LOG_ERROR("BUG: unknown JTAG command type encountered");
-				exit(-1);
+			jtag_sleep(cmd->cmd.sleep->us);
+			break;
+
+		case JTAG_TMS:
+			retval = syncbb_execute_tms(cmd);
+			break;
+		default:
+			LOG_ERROR("BUG: unknown JTAG command type encountered");
+			exit(-1);
 		}
 		if (ft232r_output_len > 0)
 			ft232r_send_recv();

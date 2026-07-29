@@ -115,8 +115,6 @@ struct jtag_event_callback {
 /* callbacks to inform high-level handlers about JTAG state changes */
 static struct jtag_event_callback *jtag_event_callbacks;
 
-extern struct adapter_driver *adapter_driver;
-
 void jtag_set_flush_queue_sleep(int ms)
 {
 	jtag_flush_queue_sleep = ms;
@@ -148,19 +146,16 @@ static bool jtag_poll_en = true;
 bool is_jtag_poll_safe(void)
 {
 	/* Polling can be disabled explicitly with set_enabled(false).
-	 * It can also be masked with mask().
-	 * It is also implicitly disabled while TRST is active and
-	 * while SRST is gating the JTAG clock.
-	 */
-	if (!jtag_poll_en)
+	 * It can also be masked with mask(). */
+	if (!jtag_poll_en || !jtag_poll)
 		return false;
 
-	if (!transport_is_jtag())
-		return jtag_poll;
-
-	if (!jtag_poll || jtag_trst != 0)
+	/* On JTAG transport it is also implicitly disabled while TRST is active */
+	if (transport_is_jtag() && jtag_trst == 1)
 		return false;
-	return jtag_srst == 0 || (jtag_reset_config & RESET_SRST_NO_GATING);
+
+	/* On any transport while SRST is gating the JTAG clock or other debug HW */
+	return jtag_srst != 1 || (jtag_reset_config & RESET_SRST_NO_GATING);
 }
 
 bool jtag_poll_get_enabled(void)
@@ -558,6 +553,10 @@ int jtag_add_tms_seq(unsigned int nbits, const uint8_t *seq, enum tap_state stat
 void jtag_add_pathmove(unsigned int num_states, const enum tap_state *path)
 {
 	enum tap_state cur_state = cmd_queue_cur_state;
+
+	// quit if there is nothing to do
+	if (num_states == 0)
+		return;
 
 	/* the last state has to be a stable state */
 	if (!tap_is_state_stable(path[num_states - 1])) {
@@ -1002,60 +1001,60 @@ int default_interface_jtag_execute_queue(void)
 	struct jtag_command *cmd = jtag_command_queue_get();
 	int result = adapter_driver->jtag_ops->execute_queue(cmd);
 
-	while (debug_level >= LOG_LVL_DEBUG_IO && cmd) {
+	while (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO) && cmd) {
 		switch (cmd->type) {
-			case JTAG_SCAN:
-				LOG_DEBUG_IO("JTAG %s SCAN to %s",
-						cmd->cmd.scan->ir_scan ? "IR" : "DR",
-						tap_state_name(cmd->cmd.scan->end_state));
-				for (unsigned int i = 0; i < cmd->cmd.scan->num_fields; i++) {
-					struct scan_field *field = cmd->cmd.scan->fields + i;
-					if (field->out_value) {
-						char *str = buf_to_hex_str(field->out_value, field->num_bits);
-						LOG_DEBUG_IO("  %ub out: %s", field->num_bits, str);
-						free(str);
-					}
-					if (field->in_value) {
-						char *str = buf_to_hex_str(field->in_value, field->num_bits);
-						LOG_DEBUG_IO("  %ub  in: %s", field->num_bits, str);
-						free(str);
-					}
+		case JTAG_SCAN:
+			LOG_DEBUG_IO("JTAG %s SCAN to %s",
+					cmd->cmd.scan->ir_scan ? "IR" : "DR",
+					tap_state_name(cmd->cmd.scan->end_state));
+			for (unsigned int i = 0; i < cmd->cmd.scan->num_fields; i++) {
+				struct scan_field *field = cmd->cmd.scan->fields + i;
+				if (field->out_value) {
+					char *str = buf_to_hex_str(field->out_value, field->num_bits);
+					LOG_DEBUG_IO("  %ub out: %s", field->num_bits, str);
+					free(str);
 				}
-				break;
-			case JTAG_TLR_RESET:
-				LOG_DEBUG_IO("JTAG TLR RESET to %s",
-						tap_state_name(cmd->cmd.statemove->end_state));
-				break;
-			case JTAG_RUNTEST:
-				LOG_DEBUG_IO("JTAG RUNTEST %d cycles to %s",
-						cmd->cmd.runtest->num_cycles,
-						tap_state_name(cmd->cmd.runtest->end_state));
-				break;
-			case JTAG_RESET:
-				{
-					const char *reset_str[3] = {
-						"leave", "deassert", "assert"
-					};
-					LOG_DEBUG_IO("JTAG RESET %s TRST, %s SRST",
-							reset_str[cmd->cmd.reset->trst + 1],
-							reset_str[cmd->cmd.reset->srst + 1]);
+				if (field->in_value) {
+					char *str = buf_to_hex_str(field->in_value, field->num_bits);
+					LOG_DEBUG_IO("  %ub  in: %s", field->num_bits, str);
+					free(str);
 				}
-				break;
-			case JTAG_PATHMOVE:
-				LOG_DEBUG_IO("JTAG PATHMOVE (TODO)");
-				break;
-			case JTAG_SLEEP:
-				LOG_DEBUG_IO("JTAG SLEEP (TODO)");
-				break;
-			case JTAG_STABLECLOCKS:
-				LOG_DEBUG_IO("JTAG STABLECLOCKS (TODO)");
-				break;
-			case JTAG_TMS:
-				LOG_DEBUG_IO("JTAG TMS (TODO)");
-				break;
-			default:
-				LOG_ERROR("Unknown JTAG command: %d", cmd->type);
-				break;
+			}
+			break;
+		case JTAG_TLR_RESET:
+			LOG_DEBUG_IO("JTAG TLR RESET to %s",
+					tap_state_name(cmd->cmd.statemove->end_state));
+			break;
+		case JTAG_RUNTEST:
+			LOG_DEBUG_IO("JTAG RUNTEST %d cycles to %s",
+					cmd->cmd.runtest->num_cycles,
+					tap_state_name(cmd->cmd.runtest->end_state));
+			break;
+		case JTAG_RESET:
+			{
+				const char *reset_str[3] = {
+					"leave", "deassert", "assert"
+				};
+				LOG_DEBUG_IO("JTAG RESET %s TRST, %s SRST",
+						reset_str[cmd->cmd.reset->trst + 1],
+						reset_str[cmd->cmd.reset->srst + 1]);
+			}
+			break;
+		case JTAG_PATHMOVE:
+			LOG_DEBUG_IO("JTAG PATHMOVE (TODO)");
+			break;
+		case JTAG_SLEEP:
+			LOG_DEBUG_IO("JTAG SLEEP (TODO)");
+			break;
+		case JTAG_STABLECLOCKS:
+			LOG_DEBUG_IO("JTAG STABLECLOCKS (TODO)");
+			break;
+		case JTAG_TMS:
+			LOG_DEBUG_IO("JTAG TMS (TODO)");
+			break;
+		default:
+			LOG_ERROR("Unknown JTAG command: %d", cmd->type);
+			break;
 		}
 		cmd = cmd->next;
 	}
@@ -1586,22 +1585,22 @@ int jtag_init_inner(struct command_context *cmd_ctx)
 	 */
 	retval = jtag_examine_chain();
 	switch (retval) {
-		case ERROR_OK:
-			/* complete success */
-			break;
-		default:
-			/* For backward compatibility reasons, try coping with
-			 * configuration errors involving only ID mismatches.
-			 * We might be able to talk to the devices.
-			 *
-			 * Also the device might be powered down during startup.
-			 *
-			 * After OpenOCD starts, we can try to power on the device
-			 * and run a reset.
-			 */
-			LOG_ERROR("Trying to use configured scan chain anyway...");
-			issue_setup = false;
-			break;
+	case ERROR_OK:
+		/* complete success */
+		break;
+	default:
+		/* For backward compatibility reasons, try coping with
+		 * configuration errors involving only ID mismatches.
+		 * We might be able to talk to the devices.
+		 *
+		 * Also the device might be powered down during startup.
+		 *
+		 * After OpenOCD starts, we can try to power on the device
+		 * and run a reset.
+		 */
+		LOG_ERROR("Trying to use configured scan chain anyway...");
+		issue_setup = false;
+		break;
 	}
 
 	/* Now look at IR values.  Problems here will prevent real

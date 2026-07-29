@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+
 /*
  * Base64 encoding/decoding (RFC1341)
  * Copyright (c) 2005, Jouni Malinen <j@w1.fi>
  *
- * This software may be distributed under the terms of the BSD license.
- * See README for more details.
+ * Original file from FreeBSD code
+ * https://cgit.freebsd.org/src/tree/contrib/wpa/src/utils/base64.h?id=f05cddf940db
  */
 
 #ifndef BASE64_H
