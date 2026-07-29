@@ -2685,7 +2685,6 @@ static int gdb_target_description_supported(struct target *target, bool *support
 			&reg_list_size, REG_CLASS_ALL);
 	if (retval != ERROR_OK) {
 		LOG_ERROR("get register list failed");
-		reg_list = NULL;
 		goto error;
 	}
 
