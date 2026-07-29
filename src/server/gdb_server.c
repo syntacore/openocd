@@ -456,8 +456,6 @@ static int gdb_put_packet_inner(struct connection *connection,
 	 * At this point we should have nothing in the input queue from GDB,
 	 * however sometimes '-' is sent even though we've already received
 	 * an ACK (+) for everything we've sent off.
-	 *
-	 * This code appears to sometimes eat a ^C coming from gdb.
 	 */
 	int gotdata;
 	for (;; ) {
@@ -1560,7 +1558,7 @@ static int gdb_read_memory_packet(struct connection *connection,
 	uint8_t *buffer;
 	char *hex_buffer;
 
-	int retval;
+	int retval = ERROR_OK;
 
 	/* skip command character */
 	packet++;
@@ -2829,7 +2827,6 @@ static int gdb_query_packet(struct connection *connection,
 			cmd = malloc((packet_size - 6) / 2 + 1);
 			size_t len = unhexify((uint8_t *)cmd, packet + 6, (packet_size - 6) / 2);
 			cmd[len] = 0;
-			LOG_DEBUG("qRcmd: %s", cmd);
 
 			/* We want to print all debug output to GDB connection */
 			gdb_connection->output_flag = GDB_OUTPUT_ALL;
