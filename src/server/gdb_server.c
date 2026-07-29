@@ -3078,24 +3078,6 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 	/* simple case, a continue packet */
 	if (parse[0] == 'c') {
 		gdb_running_type = 'c';
-
-		if (target->state == TARGET_UNAVAILABLE) {
-			struct target *available_target = get_available_target_from_connection(connection);
-			if (target == available_target) {
-				LOG_DEBUG("All targets for this gdb connection "
-						"are unavailable.  Fake to gdb that the resume "
-						"succeeded and the target is now running.");
-				gdb_connection->frontend_state = TARGET_RUNNING;
-				gdb_connection->output_flag = GDB_OUTPUT_ALL;
-				target_call_event_callbacks(target, TARGET_EVENT_GDB_START);
-				return true;
-			}
-			LOG_TARGET_DEBUG(target, "Target is unavailable. Resume %s instead.",
-					target_name(available_target));
-			/* Resume an available target. */
-			target = available_target;
-		}
-
 		LOG_TARGET_DEBUG(target, "target continue");
 		gdb_connection->output_flag = GDB_OUTPUT_ALL;
 		retval = target_resume(target, true, 0, false, false);
@@ -3201,15 +3183,19 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 		gdb_connection->output_flag = GDB_OUTPUT_ALL;
 		target_call_event_callbacks(ct, TARGET_EVENT_GDB_START);
 
+		/*
+		 * work around an annoying gdb behaviour: when the current thread
+		 * is changed in gdb, it assumes that the target can follow and also
+		 * make the thread current. This is an assumption that cannot hold
+		 * for a real target running a multi-threading OS. We just fake
+		 * the step to not trigger an internal error in gdb. See
+		 * https://sourceware.org/bugzilla/show_bug.cgi?id=22925 for details
+		 */
 		if (fake_step) {
-			/* We just fake the step to not trigger an internal error in
-			 * gdb. See https://sourceware.org/bugzilla/show_bug.cgi?id=22925
-			 * for details. */
 			int sig_reply_len;
 			char sig_reply[128];
 
 			LOG_DEBUG("fake step thread %"PRIx64, thread_id);
-			target->rtos->current_threadid = thread_id;
 
 			sig_reply_len = snprintf(sig_reply, sizeof(sig_reply),
 									"T05thread:%016"PRIx64";", thread_id);
@@ -3233,15 +3219,9 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 			return true;
 		}
 
-		if (ct->state == TARGET_UNAVAILABLE) {
-			LOG_TARGET_ERROR(ct, "Target is unavailable, so cannot be stepped. "
-					     "Pretending to gdb that it is running until it's available again.");
-			retval = ERROR_FAIL;
-		} else {
-			retval = target_step(ct, current_pc, 0, false);
-			if (retval == ERROR_TARGET_NOT_HALTED)
-				LOG_TARGET_INFO(ct, "target was not halted when step was requested");
-		}
+		retval = target_step(ct, current_pc, 0, false);
+		if (retval == ERROR_TARGET_NOT_HALTED)
+			LOG_TARGET_INFO(ct, "target was not halted when step was requested");
 
 		/* if step was successful send a reply back to gdb */
 		if (retval == ERROR_OK) {
