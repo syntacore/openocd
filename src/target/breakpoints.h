@@ -47,7 +47,7 @@ struct watchpoint {
 	bool is_set;
 	unsigned int number;
 	struct watchpoint *next;
-	uint32_t unique_id;
+	int unique_id;
 };
 
 int breakpoint_add(struct target *target,
