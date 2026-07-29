@@ -480,7 +480,7 @@ static int gdb_put_packet_inner(struct connection *connection,
 			break;
 		}
 
-		LOG_DEBUG("Discard unexpected char %c", reply);
+		LOG_WARNING("Discard unexpected char %c", reply);
 	}
 #endif
 
