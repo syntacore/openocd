@@ -3201,19 +3201,15 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 		gdb_connection->output_flag = GDB_OUTPUT_ALL;
 		target_call_event_callbacks(ct, TARGET_EVENT_GDB_START);
 
-		/*
-		 * work around an annoying gdb behaviour: when the current thread
-		 * is changed in gdb, it assumes that the target can follow and also
-		 * make the thread current. This is an assumption that cannot hold
-		 * for a real target running a multi-threading OS. We just fake
-		 * the step to not trigger an internal error in gdb. See
-		 * https://sourceware.org/bugzilla/show_bug.cgi?id=22925 for details
-		 */
 		if (fake_step) {
+			/* We just fake the step to not trigger an internal error in
+			 * gdb. See https://sourceware.org/bugzilla/show_bug.cgi?id=22925
+			 * for details. */
 			int sig_reply_len;
 			char sig_reply[128];
 
 			LOG_DEBUG("fake step thread %"PRIx64, thread_id);
+			target->rtos->current_threadid = thread_id;
 
 			sig_reply_len = snprintf(sig_reply, sizeof(sig_reply),
 									"T05thread:%016"PRIx64";", thread_id);
