@@ -3078,6 +3078,24 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 	/* simple case, a continue packet */
 	if (parse[0] == 'c') {
 		gdb_running_type = 'c';
+
+		if (target->state == TARGET_UNAVAILABLE) {
+			struct target *available_target = get_available_target_from_connection(connection);
+			if (target == available_target) {
+				LOG_DEBUG("All targets for this gdb connection "
+						"are unavailable.  Fake to gdb that the resume "
+						"succeeded and the target is now running.");
+				gdb_connection->frontend_state = TARGET_RUNNING;
+				gdb_connection->output_flag = GDB_OUTPUT_ALL;
+				target_call_event_callbacks(target, TARGET_EVENT_GDB_START);
+				return true;
+			}
+			LOG_TARGET_DEBUG(target, "Target is unavailable. Resume %s instead.",
+					target_name(available_target));
+			/* Resume an available target. */
+			target = available_target;
+		}
+
 		LOG_TARGET_DEBUG(target, "target continue");
 		gdb_connection->output_flag = GDB_OUTPUT_ALL;
 		retval = target_resume(target, true, 0, false, false);
@@ -3219,9 +3237,15 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 			return true;
 		}
 
-		retval = target_step(ct, current_pc, 0, false);
-		if (retval == ERROR_TARGET_NOT_HALTED)
-			LOG_TARGET_INFO(ct, "target was not halted when step was requested");
+		if (ct->state == TARGET_UNAVAILABLE) {
+			LOG_TARGET_ERROR(ct, "Target is unavailable, so cannot be stepped. "
+					     "Pretending to gdb that it is running until it's available again.");
+			retval = ERROR_FAIL;
+		} else {
+			retval = target_step(ct, current_pc, 0, false);
+			if (retval == ERROR_TARGET_NOT_HALTED)
+				LOG_TARGET_INFO(ct, "target was not halted when step was requested");
+		}
 
 		/* if step was successful send a reply back to gdb */
 		if (retval == ERROR_OK) {
