@@ -155,7 +155,7 @@ static int scr5_jim_configure(struct target *target,
 		if (!goi->is_configure) {
 			if (goi->argc != 0)
 				goto cget_extra_args;
-			Jim_SetResultFormatted(goi->interp, "%u", pc->tlb_n_entries);
+			Jim_SetResultFormatted(goi->interp, "%u", pc->tlb_csr_base);
 			return JIM_OK;
 		}
 		e = jim_getopt_wide(goi, &w);
