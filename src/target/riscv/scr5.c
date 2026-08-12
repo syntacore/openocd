@@ -230,7 +230,9 @@ static int scr5_search_tlb(struct target *target, target_addr_t virt_addr,
 	for (unsigned int tlb_sel = 0; tlb_sel <= 1; ++tlb_sel) {
 		for (unsigned int pte_idx = 0; pte_idx < pc->tlb_n_entries; ++pte_idx) {
 			res = riscv_reg_set(target, tlb_scan_csr,
-					tlb_sel << tlb_sel_offset | pte_idx);
+					((riscv_reg_t)tlb_sel << tlb_sel_offset) | pte_idx);
+			if (res != ERROR_OK)
+				goto cleanup;
 			riscv_reg_t tlb_attr, tlb_va;
 			res = riscv_reg_get(target, &tlb_attr, tlb_attr_csr);
 			if (res != ERROR_OK)
