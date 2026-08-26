@@ -18,11 +18,6 @@
  * by Boot or Master controller. For these devices, additional configuration of
  * spi_mst address is required to switch between the two.
  *
- * Currently supported devices typically have much more RAM then NOR Flash
- * (Jaguar2 reference design has 256MB RAM and 32MB NOR Flash), so supporting
- * work-area sizes smaller then transfer buffer seems like the unnecessary
- * complication.
- *
  * This code was tested on Jaguar2 VSC7448 connected to Macronix MX25L25635F.
  */
 
@@ -33,12 +28,15 @@
 #include "dw-spi-helper.h"
 #include "imp.h"
 #include "spi.h"
+#include "sfdp.h"
 
+#include <helper/align.h>
 #include <helper/bits.h>
 #include <helper/time_support.h>
 #include <target/algorithm.h>
 #include <target/breakpoints.h>
 #include <target/mips32.h>
+#include <target/riscv/riscv.h>
 #include <target/target_type.h>
 
 /**
@@ -50,12 +48,13 @@
  * This structure defines some implementation specific variables.
  */
 struct dw_spi_regmap {
-	uint32_t freq; ///< Clock frequency.
 	target_addr_t simc; ///< Absolute offset of SIMC register block.
 	target_addr_t spi_mst;
 	///< Absolute offset of ICPU_CFG:SPI_MST register. 0 if not available.
+	uint32_t freq; ///< Clock frequency.
 	uint8_t si_if_owner_offset;
 	///< Offset of \ref si_mode bits in ICPU_CFG:SPI_MST.
+	bool hssi; ///< HSSI IP.
 };
 
 /**
@@ -98,35 +97,181 @@ enum dw_spi_si_mode {
 #define DW_SPI_REG_IMR 0x2c ///< Interrupt configuration register.
 #define DW_SPI_REG_DR 0x60 ///< Data register.
 
-#define DW_SPI_REG_CTRLR0_DFS(x) ((x) & GENMASK(3, 0)) ///< Data frame size.
-#define DW_SPI_REG_CTRLR0_FRF(x) (((x) << 4) & GENMASK(5, 4)) ///< SI protocol.
-#define DW_SPI_REG_CTRLR0_SCPH(x) ((!!(x)) << 6) ///< Probe position.
-#define DW_SPI_REG_CTRLR0_SCPOL(x) ((!!(x)) << 7) ///< Probe polarity.
-#define DW_SPI_REG_CTRLR0_TMOD(x) (((x) << 8) & GENMASK(9, 8)) ///< SI mode.
+#define DW_SPI_REG_PSSI_CTRLR0_DFS(x) ((x) & GENMASK(3, 0))
+///< Data frame size.
+#define DW_SPI_REG_HSSI_CTRLR0_DFS(x) ((x) & GENMASK(4, 0))
+///< Data frame size.
+#define DW_SPI_REG_PSSI_CTRLR0_FRF(x) (((x) << 4) & GENMASK(5, 4))
+ ///< SI protocol.
+#define DW_SPI_REG_HSSI_CTRLR0_FRF(x) (((x) << 6) & GENMASK(7, 6))
+ ///< SI protocol.
+#define DW_SPI_REG_PSSI_CTRLR0_SCPH(x) ((!!(x)) << 6) ///< Probe position.
+#define DW_SPI_REG_HSSI_CTRLR0_SCPH(x) ((!!(x)) << 8) ///< Probe position.
+#define DW_SPI_REG_PSSI_CTRLR0_SCPOL(x) ((!!(x)) << 7) ///< Probe polarity.
+#define DW_SPI_REG_HSSI_CTRLR0_SCPOL(x) ((!!(x)) << 9) ///< Probe polarity.
+#define DW_SPI_REG_PSSI_CTRLR0_TMOD(x) (((x) << 8) & GENMASK(9, 8))
+ ///< SI mode.
+#define DW_SPI_REG_HSSI_CTRLR0_TMOD(x) (((x) << 10) & GENMASK(11, 10))
+ ///< SI mode.
 #define DW_SPI_REG_SIMCEN_SIMCEN(x) (!!(x)) ///< Controller enable.
 #define DW_SPI_REG_SER_SER(x) ((x) & GENMASK(15, 0)) ///< Slave select bitmask.
 #define DW_SPI_REG_BAUDR_SCKDV(x) ((x) & GENMASK(15, 0)) ///< Clock divisor.
 
 /**
- * @brief Driver private state.
+ * @brief Supported driver targets.
  */
-struct dw_spi_driver {
-	bool probed; ///< Bank is probed.
-	uint32_t id; ///< Chip ID.
-	unsigned int speed; ///< Flash speed.
-	unsigned int timeout; ///< Flash timeout in milliseconds.
-	uint8_t chip_select_bitmask; ///< Chip select bitmask.
-	bool four_byte_mode; ///< Flash chip is in 32bit address mode.
-	enum dw_spi_si_mode saved_ctrl_mode;
-	///< Previously selected controller mode.
-	struct dw_spi_regmap regmap; ///< SI controller regmap.
-	const struct flash_device *spi_flash; ///< SPI flash device info.
+enum dw_spi_target {
+	DW_SPI_TARGET_MIPS32,
+	DW_SPI_TARGET_RISCV64,
+	DW_SPI_TARGET_MAX,
+};
+
+/**
+ * @brief Helper function selector.
+ */
+struct target_code_info {
+	const uint8_t *code;
+	const size_t size;
+	void *arch_info;
 };
 
 /**
  * @brief Register used to pass argument struct to helper functions.
  */
-#define DW_SPI_ARG_REG "r4"
+const char *dw_spi_arg_reg[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = "r4",
+	[DW_SPI_TARGET_RISCV64] = "a0",
+};
+
+static struct mips32_algorithm mips32_algo = {
+	.common_magic = MIPS32_COMMON_MAGIC, .isa_mode = MIPS32_ISA_MIPS32};
+
+static const uint8_t misp32_target_code_tr[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-transaction.inc"
+};
+static const uint8_t riscv64_target_code_tr[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-transaction.inc"
+};
+
+/**
+ * @brief Transaction function loaders.
+ */
+static const struct target_code_info target_codes_tr[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_tr,
+		.size = sizeof(misp32_target_code_tr),
+		.arch_info = (void *)&mips32_algo,
+	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_tr,
+		.size = sizeof(riscv64_target_code_tr),
+	},
+};
+
+static const uint8_t misp32_target_code_fill[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-check_fill.inc"
+};
+static const uint8_t riscv64_target_code_fill[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-check_fill.inc"
+};
+
+/**
+ * @brief Check fill function loaders.
+ */
+static const struct target_code_info target_codes_fill[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_fill,
+		.size = sizeof(misp32_target_code_fill),
+		.arch_info = (void *)&mips32_algo,
+	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_fill,
+		.size = sizeof(riscv64_target_code_fill),
+	},
+};
+
+static const uint8_t misp32_target_code_prg[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-program.inc"
+};
+static const uint8_t riscv64_target_code_prg[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-program.inc"
+};
+
+/**
+ * @brief Program function loaders.
+ */
+static const struct target_code_info target_codes_prg[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_prg,
+		.size = sizeof(misp32_target_code_prg),
+		.arch_info = (void *)&mips32_algo,
+	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_prg,
+		.size = sizeof(riscv64_target_code_prg),
+	},
+};
+
+static const uint8_t misp32_target_code_erase[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-erase.inc"
+};
+static const uint8_t riscv64_target_code_erase[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-erase.inc"
+};
+
+/**
+ * @brief Erase function loaders.
+ */
+static const struct target_code_info target_codes_erase[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_erase,
+		.size = sizeof(misp32_target_code_erase),
+		.arch_info = (void *)&mips32_algo,
+	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_erase,
+		.size = sizeof(riscv64_target_code_erase),
+	},
+};
+
+static const uint8_t misp32_target_code_read[] = {
+#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-read.inc"
+};
+static const uint8_t riscv64_target_code_read[] = {
+#include "../../../contrib/loaders/flash/dw-spi/riscv64-unknown-elf-read.inc"
+};
+
+/**
+ * @brief Read function loaders.
+ */
+static const struct target_code_info target_codes_read[DW_SPI_TARGET_MAX] = {
+	[DW_SPI_TARGET_MIPS32] = {
+		.code = misp32_target_code_read,
+		.size = sizeof(misp32_target_code_read),
+		.arch_info = (void *)&mips32_algo,
+	},
+	[DW_SPI_TARGET_RISCV64] = {
+		.code = riscv64_target_code_read,
+		.size = sizeof(riscv64_target_code_read),
+	},
+};
+
+/**
+ * @brief Driver private state.
+ */
+struct dw_spi_driver {
+	uint32_t id; ///< Chip ID.
+	unsigned int speed; ///< Flash speed.
+	unsigned int timeout; ///< Flash timeout in milliseconds.
+	enum dw_spi_target target; ///< Target index.
+	enum dw_spi_si_mode saved_ctrl_mode;
+	///< Previously selected controller mode.
+	uint8_t chip_select_bitmask; ///< Chip select bitmask.
+	bool four_byte_mode; ///< Flash chip is in 32bit address mode.
+	bool probed; ///< Bank is probed.
+	struct flash_device spi_flash; ///< SPI flash device info.
+	struct dw_spi_regmap regmap; ///< SI controller regmap.
+};
 
 /**
  * @brief Default timeout value in ms for flash transaction jobs.
@@ -156,7 +301,7 @@ dw_spi_ctrl_mode(const struct flash_bank *const bank, enum dw_spi_si_mode mode)
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	if (!regmap->spi_mst)
+	if (regmap->spi_mst == UINT64_MAX)
 		return ERROR_OK;
 
 	uint32_t ctrl;
@@ -195,7 +340,7 @@ dw_spi_ctrl_mode_configure(const struct flash_bank *const bank,
 	struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	if (!regmap->spi_mst)
+	if (regmap->spi_mst == UINT64_MAX)
 		return ERROR_OK;
 
 	uint32_t ctrl;
@@ -268,11 +413,16 @@ dw_spi_ctrl_configure_si(const struct flash_bank *const bank)
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
 	// 8 bit frame; Motorola protocol; middle lo probe; TX RX mode
-	const uint32_t mode = DW_SPI_REG_CTRLR0_DFS(0x7) |
-						  DW_SPI_REG_CTRLR0_FRF(0) |
-						  DW_SPI_REG_CTRLR0_SCPH(0) |
-						  DW_SPI_REG_CTRLR0_SCPOL(0) |
-						  DW_SPI_REG_CTRLR0_TMOD(0);
+	const uint32_t mode = regmap->hssi ? DW_SPI_REG_HSSI_CTRLR0_DFS(0x7) |
+											 DW_SPI_REG_HSSI_CTRLR0_FRF(0) |
+											 DW_SPI_REG_HSSI_CTRLR0_SCPH(0) |
+											 DW_SPI_REG_HSSI_CTRLR0_SCPOL(0) |
+											 DW_SPI_REG_HSSI_CTRLR0_TMOD(0)
+									   : DW_SPI_REG_PSSI_CTRLR0_DFS(0x7) |
+											 DW_SPI_REG_PSSI_CTRLR0_FRF(0) |
+											 DW_SPI_REG_PSSI_CTRLR0_SCPH(0) |
+											 DW_SPI_REG_PSSI_CTRLR0_SCPOL(0) |
+											 DW_SPI_REG_PSSI_CTRLR0_TMOD(0);
 
 	int ret = target_write_u32(target, regmap->simc + DW_SPI_REG_CTRLR0, mode);
 	if (ret) {
@@ -360,10 +510,11 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	static const uint8_t target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-transaction.inc"
-	};
-	const size_t target_code_size = sizeof(target_code);
+	const uint8_t *target_code = target_codes_tr[driver->target].code;
+	const size_t target_code_size = target_codes_tr[driver->target].size;
+	void *target_arch_info = target_codes_tr[driver->target].arch_info;
+	const unsigned int address_bits = target_address_bits(target);
+
 	const size_t total_working_area_size =
 		target_code_size + sizeof(struct dw_spi_transaction) + size;
 
@@ -371,7 +522,7 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -380,7 +531,7 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_transaction),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -388,7 +539,7 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, size, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -408,32 +559,30 @@ dw_spi_ctrl_transaction(const struct flash_bank *const bank,
 	}
 
 	// prepare helper execution
-	struct mips32_algorithm mips32_algo = { .common_magic = MIPS32_COMMON_MAGIC,
-											.isa_mode = MIPS32_ISA_MIPS32 };
-
 	struct reg_param reg_param;
-	init_reg_param(&reg_param, DW_SPI_ARG_REG, 32, PARAM_OUT);
+	init_reg_param(&reg_param, dw_spi_arg_reg[driver->target],
+				   address_bits, PARAM_OUT);
 	struct mem_param mem_param;
 	init_mem_param(&mem_param, helper_args->address, helper_args->size,
 				   PARAM_OUT);
 
 	// Set the arguments for the helper
-	buf_set_u32(reg_param.value, 0, 32, helper_args->address);
+	buf_set_u64(reg_param.value, 0, address_bits, helper_args->address);
 
 	struct dw_spi_transaction *helper_args_val =
 		(struct dw_spi_transaction *)mem_param.value;
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->buffer,
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->buffer,
 						  target_buffer->address);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->size, size);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->status_reg,
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->status_reg,
 						  regmap->simc + DW_SPI_REG_SR);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->data_reg,
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->data_reg,
 						  regmap->simc + DW_SPI_REG_DR);
+	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->size, size);
 	helper_args_val->read_flag = read;
 
 	ret = target_run_algorithm(target, 1, &mem_param, 1, &reg_param,
 							   helper->address, 0, DW_SPI_TIMEOUT_TRANSACTION,
-							   &mips32_algo);
+							   target_arch_info);
 
 	if (ret) {
 		LOG_ERROR("DW SPI flash algorithm error");
@@ -486,10 +635,11 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	static const uint8_t target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-check_fill.inc"
-	};
-	const size_t target_code_size = sizeof(target_code);
+	const uint8_t *target_code = target_codes_fill[driver->target].code;
+	const size_t target_code_size = target_codes_fill[driver->target].size;
+	void *target_arch_info = target_codes_fill[driver->target].arch_info;
+	const unsigned int address_bits = target_address_bits(target);
+
 	const size_t total_working_area_size =
 		target_code_size + sizeof(struct dw_spi_check_fill) + sector_count;
 
@@ -497,7 +647,7 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -506,7 +656,7 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_check_fill),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -514,7 +664,7 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, sector_count, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -528,40 +678,38 @@ dw_spi_ctrl_check_sectors_fill(const struct flash_bank *const bank,
 	}
 
 	// prepare helper execution
-	struct mips32_algorithm mips32_algo = { .common_magic = MIPS32_COMMON_MAGIC,
-											.isa_mode = MIPS32_ISA_MIPS32 };
-
 	struct reg_param reg_param;
-	init_reg_param(&reg_param, DW_SPI_ARG_REG, 32, PARAM_OUT);
+	init_reg_param(&reg_param, dw_spi_arg_reg[driver->target],
+				   address_bits, PARAM_OUT);
 	struct mem_param mem_param;
 	init_mem_param(&mem_param, helper_args->address, helper_args->size,
 				   PARAM_OUT);
 
 	// Set the arguments for the helper
-	buf_set_u32(reg_param.value, 0, 32, helper_args->address);
+	buf_set_u64(reg_param.value, 0, address_bits, helper_args->address);
 
 	struct dw_spi_check_fill *helper_args_val =
 		(struct dw_spi_check_fill *)mem_param.value;
+	target_buffer_set_u64(target,
+						  (uint8_t *)&helper_args_val->fill_status_array,
+						  target_buffer->address);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->status_reg,
+						  regmap->simc + DW_SPI_REG_SR);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->data_reg,
+						  regmap->simc + DW_SPI_REG_DR);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->address,
 						  address);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->sector_size,
 						  sector_size);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->sector_count,
 						  sector_count);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->status_reg,
-						  regmap->simc + DW_SPI_REG_SR);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->data_reg,
-						  regmap->simc + DW_SPI_REG_DR);
-	target_buffer_set_u32(target,
-						  (uint8_t *)&helper_args_val->fill_status_array,
-						  target_buffer->address);
 	helper_args_val->pattern = pattern;
 	helper_args_val->read_cmd = read_cmd;
 	helper_args_val->four_byte_mode = driver->four_byte_mode;
 
 	ret = target_run_algorithm(target, 1, &mem_param, 1, &reg_param,
 							   helper->address, 0, driver->timeout,
-							   &mips32_algo);
+							   target_arch_info);
 
 	if (ret) {
 		LOG_ERROR("DW SPI flash algorithm error");
@@ -614,10 +762,11 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	static const uint8_t target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-program.inc"
-	};
-	const size_t target_code_size = sizeof(target_code);
+	const uint8_t *target_code = target_codes_prg[driver->target].code;
+	const size_t target_code_size = target_codes_prg[driver->target].size;
+	void *target_arch_info = target_codes_prg[driver->target].arch_info;
+	const unsigned int address_bits = target_address_bits(target);
+
 	const size_t total_working_area_size =
 		target_code_size + sizeof(struct dw_spi_program) + buffer_size;
 
@@ -625,7 +774,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -634,7 +783,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_program),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -642,7 +791,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, buffer_size, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -663,31 +812,29 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 	}
 
 	// prepare helper execution
-	struct mips32_algorithm mips32_algo = { .common_magic = MIPS32_COMMON_MAGIC,
-											.isa_mode = MIPS32_ISA_MIPS32 };
-
 	struct reg_param reg_param;
-	init_reg_param(&reg_param, DW_SPI_ARG_REG, 32, PARAM_OUT);
+	init_reg_param(&reg_param, dw_spi_arg_reg[driver->target],
+				   address_bits, PARAM_OUT);
 	struct mem_param mem_param;
 	init_mem_param(&mem_param, helper_args->address, helper_args->size,
 				   PARAM_OUT);
 
 	// Set the arguments for the helper
-	buf_set_u32(reg_param.value, 0, 32, helper_args->address);
+	buf_set_u64(reg_param.value, 0, address_bits, helper_args->address);
 	struct dw_spi_program *helper_args_val =
 		(struct dw_spi_program *)mem_param.value;
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->buffer,
+						  target_buffer->address);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->status_reg,
+						  regmap->simc + DW_SPI_REG_SR);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->data_reg,
+						  regmap->simc + DW_SPI_REG_DR);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->address,
 						  address);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->page_size,
 						  page_size);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->buffer,
-						  target_buffer->address);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->buffer_size,
 						  buffer_size);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->status_reg,
-						  regmap->simc + DW_SPI_REG_SR);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->data_reg,
-						  regmap->simc + DW_SPI_REG_DR);
 	helper_args_val->read_status_cmd = stat_cmd;
 	helper_args_val->write_enable_cmd = we_cmd;
 	helper_args_val->program_cmd = program_cmd;
@@ -697,7 +844,7 @@ dw_spi_ctrl_program(const struct flash_bank *const bank, uint32_t address,
 
 	ret = target_run_algorithm(target, 1, &mem_param, 1, &reg_param,
 							   helper->address, 0, driver->timeout,
-							   &mips32_algo);
+							   target_arch_info);
 	if (ret)
 		LOG_ERROR("DW SPI flash algorithm error");
 
@@ -740,10 +887,11 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	static const uint8_t target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-erase.inc"
-	};
-	const size_t target_code_size = sizeof(target_code);
+	const uint8_t *target_code = target_codes_erase[driver->target].code;
+	const size_t target_code_size = target_codes_erase[driver->target].size;
+	void *target_arch_info = target_codes_erase[driver->target].arch_info;
+	const unsigned int address_bits = target_address_bits(target);
+
 	const size_t total_working_area_size =
 		target_code_size + sizeof(struct dw_spi_erase);
 
@@ -751,7 +899,7 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -760,7 +908,7 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_erase),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -774,29 +922,27 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 	}
 
 	// prepare helper execution
-	struct mips32_algorithm mips32_algo = { .common_magic = MIPS32_COMMON_MAGIC,
-											.isa_mode = MIPS32_ISA_MIPS32 };
-
 	struct reg_param reg_param;
-	init_reg_param(&reg_param, DW_SPI_ARG_REG, 32, PARAM_OUT);
+	init_reg_param(&reg_param, dw_spi_arg_reg[driver->target],
+				   address_bits, PARAM_OUT);
 	struct mem_param mem_param;
 	init_mem_param(&mem_param, helper_args->address, helper_args->size,
 				   PARAM_OUT);
 
 	// Set the arguments for the helper
-	buf_set_u32(reg_param.value, 0, 32, helper_args->address);
+	buf_set_u64(reg_param.value, 0, address_bits, helper_args->address);
 	struct dw_spi_erase *helper_args_val =
 		(struct dw_spi_erase *)mem_param.value;
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->status_reg,
+						  regmap->simc + DW_SPI_REG_SR);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->data_reg,
+						  regmap->simc + DW_SPI_REG_DR);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->address,
 						  address);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->sector_size,
 						  sector_size);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->sector_count,
 						  sector_count);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->status_reg,
-						  regmap->simc + DW_SPI_REG_SR);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->data_reg,
-						  regmap->simc + DW_SPI_REG_DR);
 	helper_args_val->read_status_cmd = stat_cmd;
 	helper_args_val->write_enable_cmd = we_cmd;
 	helper_args_val->erase_sector_cmd = erase_sector_cmd;
@@ -806,7 +952,7 @@ dw_spi_ctrl_erase_sectors(const struct flash_bank *const bank, uint32_t address,
 
 	ret = target_run_algorithm(target, 1, &mem_param, 1, &reg_param,
 							   helper->address, 0, driver->timeout,
-							   &mips32_algo);
+							   target_arch_info);
 	if (ret)
 		LOG_ERROR("DW SPI flash algorithm error");
 
@@ -840,10 +986,11 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 	const struct dw_spi_regmap *const regmap = &driver->regmap;
 
-	static const uint8_t target_code[] = {
-#include "../../../contrib/loaders/flash/dw-spi/mipsel-linux-gnu-read.inc"
-	};
-	const size_t target_code_size = sizeof(target_code);
+	const uint8_t *target_code = target_codes_read[driver->target].code;
+	const size_t target_code_size = target_codes_read[driver->target].size;
+	void *target_arch_info = target_codes_read[driver->target].arch_info;
+	const unsigned int address_bits = target_address_bits(target);
+
 	const size_t total_working_area_size =
 		target_code_size + sizeof(struct dw_spi_read) + buffer_size;
 
@@ -851,7 +998,7 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *helper;
 	int ret = target_alloc_working_area(target, target_code_size, &helper);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper;
 	}
@@ -860,7 +1007,7 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	ret = target_alloc_working_area(target, sizeof(struct dw_spi_read),
 									&helper_args);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_helper_args;
 	}
@@ -868,7 +1015,7 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	struct working_area *target_buffer;
 	ret = target_alloc_working_area(target, buffer_size, &target_buffer);
 	if (ret) {
-		LOG_ERROR("DW SPI could not allocate working area. Need %zx",
+		LOG_ERROR("DW SPI could not allocate working area. Need 0x%zx",
 				  total_working_area_size);
 		goto err_target_buffer;
 	}
@@ -882,34 +1029,32 @@ dw_spi_ctrl_read(const struct flash_bank *const bank, uint32_t address,
 	}
 
 	// prepare helper execution
-	struct mips32_algorithm mips32_algo = { .common_magic = MIPS32_COMMON_MAGIC,
-											.isa_mode = MIPS32_ISA_MIPS32 };
-
 	struct reg_param reg_param;
-	init_reg_param(&reg_param, DW_SPI_ARG_REG, 32, PARAM_OUT);
+	init_reg_param(&reg_param, dw_spi_arg_reg[driver->target],
+				   address_bits, PARAM_OUT);
 	struct mem_param mem_param;
 	init_mem_param(&mem_param, helper_args->address, helper_args->size,
 				   PARAM_OUT);
 
 	// Set the arguments for the helper
-	buf_set_u32(reg_param.value, 0, 32, helper_args->address);
+	buf_set_u64(reg_param.value, 0, address_bits, helper_args->address);
 	struct dw_spi_read *helper_args_val = (struct dw_spi_read *)mem_param.value;
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->buffer,
+						  target_buffer->address);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->status_reg,
+						  regmap->simc + DW_SPI_REG_SR);
+	target_buffer_set_u64(target, (uint8_t *)&helper_args_val->data_reg,
+						  regmap->simc + DW_SPI_REG_DR);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->address,
 						  address);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->buffer,
-						  target_buffer->address);
 	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->buffer_size,
 						  buffer_size);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->status_reg,
-						  regmap->simc + DW_SPI_REG_SR);
-	target_buffer_set_u32(target, (uint8_t *)&helper_args_val->data_reg,
-						  regmap->simc + DW_SPI_REG_DR);
 	helper_args_val->read_cmd = read_cmd;
 	helper_args_val->four_byte_mode = driver->four_byte_mode;
 
 	ret = target_run_algorithm(target, 1, &mem_param, 1, &reg_param,
 							   helper->address, 0, driver->timeout,
-							   &mips32_algo);
+							   target_arch_info);
 	if (ret) {
 		LOG_ERROR("DW SPI flash algorithm error");
 		goto cleanup;
@@ -1069,7 +1214,7 @@ dw_spi_erase_chip(const struct flash_bank *const bank)
 		return ret;
 
 	memset(buffer, 0, buffer_size);
-	buffer[0] = driver->spi_flash->chip_erase_cmd;
+	buffer[0] = driver->spi_flash.chip_erase_cmd;
 
 	ret = dw_spi_ctrl_transaction(bank, buffer, buffer_size, false);
 	if (ret) {
@@ -1108,11 +1253,11 @@ dw_spi_erase_sectors(const struct flash_bank *const bank, unsigned int first,
 	} else {
 		// partial erase
 		int ret = dw_spi_ctrl_erase_sectors(bank, bank->sectors[first].offset,
-											driver->spi_flash->sectorsize,
+											driver->spi_flash.sectorsize,
 											last - first + 1,
 											SPIFLASH_READ_STATUS,
 											SPIFLASH_WRITE_ENABLE,
-											driver->spi_flash->erase_cmd,
+											driver->spi_flash.erase_cmd,
 											SPIFLASH_WE_BIT, SPIFLASH_BSY_BIT);
 		if (ret) {
 			LOG_ERROR("DW SPI flash erase sectors error");
@@ -1132,30 +1277,63 @@ dw_spi_blank_check(struct flash_bank *bank, size_t sector_count,
 {
 	const struct dw_spi_driver *const driver = bank->driver_priv;
 
+	const size_t max_workarea_size =
+		target_get_working_area_avail(bank->target);
+	const size_t helper_size =
+		ALIGN_UP(target_codes_fill[driver->target].size, 4) +
+		ALIGN_UP(sizeof(struct dw_spi_check_fill), 4);
+
+	if (max_workarea_size < helper_size + 4) {
+		LOG_ERROR("insufficient workarea size, need 0x%zx", helper_size + 4);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	}
+
+	const size_t total_buffer_size =
+		MIN(max_workarea_size, helper_size + sector_count);
+	const size_t buffer_size = total_buffer_size - helper_size;
+
+	if (!buffer_size) {
+		LOG_ERROR("invalid buffer size");
+		return ERROR_BUF_TOO_SMALL;
+	}
+
+	const unsigned int read_iterations =
+		(sector_count / buffer_size + (sector_count % buffer_size > 0));
+
 	uint8_t *erased = malloc(sector_count);
 	if (!erased) {
 		LOG_ERROR("could not allocate memory");
 		return ERROR_FAIL;
 	}
+	uint8_t *const erased_buffer = erased;
 
 	// set initial erased value to unknown
 	memset(erased, 2, sector_count);
 	for (unsigned int sector_idx = 0; sector_idx < sector_count; sector_idx++)
 		bank->sectors[sector_idx].is_erased = 2;
 
-	int ret = dw_spi_ctrl_check_sectors_fill(bank, 0, bank->sectors[0].size,
-											 sector_count, pattern,
-											 driver->spi_flash->read_cmd,
+	int ret;
+	for (size_t iter = 0, count = sector_count; iter < read_iterations;
+		 iter++, erased += buffer_size, count -= buffer_size) {
+		uint32_t address = iter * buffer_size * bank->sectors[0].size;
+		ret = dw_spi_ctrl_check_sectors_fill(bank, address,
+											 bank->sectors[0].size,
+											 MIN(count, buffer_size), pattern,
+											 driver->spi_flash.read_cmd,
 											 erased);
+		if (ret)
+			break;
+	}
+
 	if (!ret) {
 		for (unsigned int sector_idx = 0; sector_idx < sector_count;
 			 sector_idx++)
-			bank->sectors[sector_idx].is_erased = erased[sector_idx];
+			bank->sectors[sector_idx].is_erased = erased_buffer[sector_idx];
 	} else {
 		LOG_ERROR("DW SPI flash erase check error");
 	}
 
-	free(erased);
+	free(erased_buffer);
 
 	return ret;
 }
@@ -1174,41 +1352,127 @@ dw_spi_write_buffer(const struct flash_bank *const bank, const uint8_t *buffer,
 					uint32_t offset, uint32_t count)
 {
 	const struct dw_spi_driver *const driver = bank->driver_priv;
-	const size_t page_size = driver->spi_flash->pagesize;
+	const size_t page_size = driver->spi_flash.pagesize;
 
-	// Write unaligned first sector separately as helper function does
-	// not handle this case well.
-	struct {
-		uint32_t address;
-		const uint8_t *buffer;
-		size_t count;
-	} chunks[2] = {
-		{ .address = offset, .buffer = buffer, .count = 0 },
-		{ .address = offset, .buffer = buffer, .count = count },
-	};
+	const size_t max_workarea_size =
+		target_get_working_area_avail(bank->target);
+	const size_t helper_size =
+		ALIGN_UP(target_codes_prg[driver->target].size, 4) +
+		ALIGN_UP(sizeof(struct dw_spi_program), 4);
 
-	if (offset % page_size) {
-		// start is not aligned
-		chunks[0].count = MIN(page_size - (offset % page_size), count);
-		chunks[1].count -= chunks[0].count;
-		chunks[1].address += chunks[0].count;
-		chunks[1].buffer += chunks[0].count;
+	if (max_workarea_size < helper_size + 4) {
+		LOG_ERROR("insufficient workarea size, need 0x%zx", helper_size + 4);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 	}
 
-	for (unsigned int chunk_idx = 0; chunk_idx < ARRAY_SIZE(chunks);
-		 chunk_idx++) {
-		if (chunks[chunk_idx].count > 0) {
-			int ret = dw_spi_ctrl_program(bank, chunks[chunk_idx].address,
-										  chunks[chunk_idx].buffer,
-										  chunks[chunk_idx].count, page_size,
-										  SPIFLASH_READ_STATUS,
-										  SPIFLASH_WRITE_ENABLE,
-										  driver->spi_flash->pprog_cmd,
-										  SPIFLASH_WE_BIT, SPIFLASH_BSY_BIT);
-			if (ret) {
-				LOG_ERROR("DW SPI flash write error");
-				return ret;
+	const size_t total_buffer_size =
+		MIN(max_workarea_size, helper_size + count);
+	const size_t buffer_size = total_buffer_size - helper_size;
+
+	if (!buffer_size) {
+		LOG_ERROR("invalid buffer size");
+		return ERROR_BUF_TOO_SMALL;
+	}
+
+	const unsigned int write_iterations =
+		(count / buffer_size + (count % buffer_size > 0));
+
+	// Outer loop deals with buffer size bigger than workarea size,
+	// inner loop deals with alignment issues.
+	for (unsigned int iter = 0; iter < write_iterations; iter++,
+					  offset += buffer_size, buffer += buffer_size,
+					  count -= buffer_size) {
+		// Write unaligned first sector separately as helper function does
+		// not handle this case well.
+		struct {
+			uint32_t address;
+			const uint8_t *buffer;
+			size_t count;
+		} chunks[2] = {
+			{.address = offset, .buffer = buffer, .count = 0},
+			{.address = offset,
+			 .buffer = buffer,
+			 .count = MIN(buffer_size, count)},
+		};
+
+		if (offset % page_size) {
+			// start is not aligned
+			chunks[0].count =
+				MIN(page_size - (offset % page_size), MIN(buffer_size, count));
+			chunks[1].count -= chunks[0].count;
+			chunks[1].address += chunks[0].count;
+			chunks[1].buffer += chunks[0].count;
+		}
+
+		for (unsigned int chunk_idx = 0; chunk_idx < ARRAY_SIZE(chunks);
+			 chunk_idx++) {
+			if (chunks[chunk_idx].count > 0) {
+				int ret = dw_spi_ctrl_program(bank, chunks[chunk_idx].address,
+											  chunks[chunk_idx].buffer,
+											  chunks[chunk_idx].count,
+											  page_size, SPIFLASH_READ_STATUS,
+											  SPIFLASH_WRITE_ENABLE,
+											  driver->spi_flash.pprog_cmd,
+											  SPIFLASH_WE_BIT,
+											  SPIFLASH_BSY_BIT);
+				if (ret) {
+					LOG_ERROR("DW SPI flash write error");
+					return ret;
+				}
 			}
+		}
+	}
+
+	return ERROR_OK;
+}
+
+/**
+ * @brief Read data from flash to buffer.
+ *
+ * @param[in] bank: Flash bank handle.
+ * @param[out] buffer: Data buffer.
+ * @param[in] offset: Flash address offset.
+ * @param[in] count: \p buffer size.
+ * @return Command execution status.
+ */
+static int
+dw_spi_read_buffer(const struct flash_bank *const bank, uint8_t *buffer,
+				   uint32_t offset, uint32_t count)
+{
+	const struct dw_spi_driver *const driver = bank->driver_priv;
+
+	const size_t max_workarea_size =
+		target_get_working_area_avail(bank->target);
+	const size_t helper_size =
+		ALIGN_UP(target_codes_read[driver->target].size, 4) +
+		ALIGN_UP(sizeof(struct dw_spi_read), 4);
+
+	if (max_workarea_size < helper_size + 4) {
+		LOG_ERROR("insufficient workarea size, need 0x%zx", helper_size + 4);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	}
+
+	const size_t total_buffer_size =
+		MIN(max_workarea_size, helper_size + count);
+	const size_t buffer_size = total_buffer_size - helper_size;
+
+	if (!buffer_size) {
+		LOG_ERROR("invalid buffer size");
+		return ERROR_BUF_TOO_SMALL;
+	}
+
+	const unsigned int read_iterations =
+		(count / buffer_size + (count % buffer_size > 0));
+
+	for (unsigned int iter = 0; iter < read_iterations; iter++,
+					  offset += buffer_size, buffer += buffer_size,
+					  count -= buffer_size) {
+		int ret =
+			dw_spi_ctrl_read(bank, offset, buffer, MIN(buffer_size, count),
+							 driver->spi_flash.read_cmd);
+		if (ret) {
+			LOG_ERROR("DW SPI flash read error");
+			return ret;
 		}
 	}
 
@@ -1233,16 +1497,16 @@ dw_spi_spiflash_search(const struct flash_bank *const bank)
 	unsigned int idx = 0;
 	while (flash_devices[idx].name) {
 		if (flash_devices[idx].device_id == driver->id) {
-			driver->spi_flash = &flash_devices[idx];
+			memcpy(&driver->spi_flash, &flash_devices[idx],
+				   sizeof(driver->spi_flash));
 			return ERROR_OK;
 		}
 		idx++;
 	}
 
-	LOG_ERROR("DW SPI could not find Flash with ID %" PRIx32
-			  " in SPI Flash table: either Flash device is not supported "
-			  "or communication speed is too high",
-			  driver->id);
+	LOG_INFO("DW SPI could not find Flash with ID %" PRIx32
+			 " in SPI Flash table",
+			 driver->id);
 	return ERROR_FAIL;
 }
 
@@ -1258,7 +1522,10 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 	unsigned int speed = 1000000;
 	unsigned int timeout = DW_SPI_TIMEOUT_DEFAULT;
 	uint8_t chip_select_bitmask = BIT(0);
-	struct dw_spi_regmap regmap = { 0 };
+	struct dw_spi_regmap regmap = {
+		.simc = UINT64_MAX,
+		.spi_mst = UINT64_MAX,
+	};
 
 	if (CMD_ARGC < 6)
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1288,12 +1555,14 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 			unsigned int cs_bit;
 			COMMAND_PARSE_NUMBER(uint, CMD_ARGV[++idx], cs_bit);
 			chip_select_bitmask = BIT(cs_bit);
+		} else if (strcmp(CMD_ARGV[idx], "-hssi") == 0) {
+			regmap.hssi = true;
 		} else {
 			LOG_WARNING("DW SPI unknown argument %s", CMD_ARGV[idx]);
 		}
 	}
 
-	if (!regmap.simc) {
+	if (regmap.simc == UINT64_MAX) {
 		LOG_ERROR("DW SPI cannot use boot controller with unconfigured simc");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
@@ -1309,7 +1578,6 @@ FLASH_BANK_COMMAND_HANDLER(dw_spi_flash_bank_command)
 	driver->speed = speed;
 	driver->timeout = timeout;
 	driver->chip_select_bitmask = chip_select_bitmask;
-	driver->four_byte_mode = true; // 24bit commands not provided by spi.h
 	memcpy(&driver->regmap, &regmap, sizeof(regmap));
 
 	return ERROR_OK;
@@ -1401,6 +1669,72 @@ dw_spi_master_ctrl_restore(struct flash_bank *bank)
 }
 
 /**
+ * @brief Read SFDP block.
+ *
+ * Used by spi_sfdp() SFDP decoder command.
+ *
+ * @param[in] bank: Flash bank handle.
+ * @param[in] addr: Offset into SFDP header.
+ * @param[in] words: Number of header words to read.
+ * @param[out] buffer: Buffer to write header to.
+ * @return Command execution status.
+ */
+static int
+dw_spi_read_sfdp_block(struct flash_bank *bank, uint32_t addr,
+					   unsigned int words, uint32_t *buffer)
+{
+	// add at most 8 dummy words
+	const size_t payload_max_offset = 1 + 3 + 8 * sizeof(uint32_t);
+	const size_t buf_size = payload_max_offset + words * sizeof(uint32_t);
+	uint8_t *buf = malloc(buf_size);
+	uint8_t *payload = NULL;
+
+	if (!buf) {
+		LOG_ERROR("could not allocate memory");
+		return ERROR_FAIL;
+	}
+
+	// find header magic position
+	memset(buf, 0, buf_size);
+	buf[0] = SPIFLASH_READ_SFDP;
+
+	int ret = dw_spi_ctrl_transaction(bank, buf, buf_size, true);
+	if (ret)
+		goto err;
+
+	for (unsigned int idx = 0; idx < payload_max_offset; idx++) {
+		if (le_to_h_u32(&buf[idx]) == SFDP_MAGIC) {
+			payload = buf + idx;
+			break;
+		}
+	}
+
+	if (!payload) {
+		LOG_INFO("SFDP header not found");
+		ret = ERROR_FLASH_OPER_UNSUPPORTED;
+		goto err;
+	}
+
+	memset(buf, 0, buf_size);
+	buf[0] = SPIFLASH_READ_SFDP;
+	buf[1] = (addr >> 16) & 0xff;
+	buf[2] = (addr >> 8) & 0xff;
+	buf[3] = (addr >> 0) & 0xff;
+
+	ret = dw_spi_ctrl_transaction(bank, buf, buf_size, true);
+	if (ret)
+		goto err;
+
+	for (; words > 0; words--, buffer++, payload += sizeof(uint32_t))
+		*buffer = le_to_h_u32(payload);
+
+err:
+	free(buf);
+
+	return ret;
+}
+
+/**
  * @brief Flash bank probe.
  *
  * @param[in] bank: Flash bank handle.
@@ -1414,10 +1748,23 @@ dw_spi_probe(struct flash_bank *bank)
 	if (!driver)
 		return ERROR_FAIL;
 
-	if (strcmp(bank->target->type->name, mips_m4k_target.name) != 0 ||
-		bank->target->endianness != TARGET_LITTLE_ENDIAN) {
-		LOG_ERROR("DW SPI currently only supports "
-				  "little endian mips_m4k target");
+	if (bank->target->endianness != TARGET_LITTLE_ENDIAN) {
+		LOG_ERROR("DW SPI currently does not support big endian targets");
+		return ERROR_TARGET_INVALID;
+	}
+
+	driver->target = DW_SPI_TARGET_MAX;
+	if (!strcmp(bank->target->type->name, mips_m4k_target.name))
+		driver->target = DW_SPI_TARGET_MIPS32;
+	if (!strcmp(bank->target->type->name, riscv_target.name)
+		&& target_address_bits(bank->target) == 64)
+		driver->target = DW_SPI_TARGET_RISCV64;
+	if (!strcmp(bank->target->type->name, scr5_target.name)
+		&& target_address_bits(bank->target) == 64)
+		driver->target = DW_SPI_TARGET_RISCV64;
+	if (driver->target == DW_SPI_TARGET_MAX) {
+		LOG_ERROR("DW SPI currently does not support target %s",
+				  bank->target->type->name);
 		return ERROR_TARGET_INVALID;
 	}
 
@@ -1426,13 +1773,20 @@ dw_spi_probe(struct flash_bank *bank)
 		return ret;
 
 	ret = dw_spi_spiflash_search(bank);
-	if (ret)
-		goto err;
+	if (ret) {
+		ret = spi_sfdp(bank, &driver->spi_flash, dw_spi_read_sfdp_block);
+		if (ret) {
+			LOG_ERROR("DW SPI could not probe Flash device. "
+					  "Either it is not supported "
+					  "or communication speed is too high");
+			goto err;
+		}
+	}
 
 	bank->write_start_alignment = 0;
 	bank->write_end_alignment = 0;
 
-	uint32_t flash_size = driver->spi_flash->size_in_bytes;
+	uint32_t flash_size = driver->spi_flash.size_in_bytes;
 	if (!bank->size) {
 		bank->size = flash_size;
 		LOG_INFO("DW SPI probed flash size 0x%" PRIx32, flash_size);
@@ -1449,13 +1803,14 @@ dw_spi_probe(struct flash_bank *bank)
 			goto err;
 		}
 	}
-	bank->num_sectors = bank->size / driver->spi_flash->sectorsize;
+	bank->num_sectors = bank->size / driver->spi_flash.sectorsize;
+	driver->four_byte_mode = bank->size > 0x1000000;
 
 	// free previously allocated in case of reprobing
 	free(bank->sectors);
 
 	bank->sectors =
-		alloc_block_array(0, driver->spi_flash->sectorsize, bank->num_sectors);
+		alloc_block_array(0, driver->spi_flash.sectorsize, bank->num_sectors);
 
 	if (!bank->sectors) {
 		LOG_ERROR("could not allocate memory");
@@ -1525,14 +1880,11 @@ static int
 dw_spi_read(struct flash_bank *bank, uint8_t *buffer, uint32_t offset,
 			uint32_t count)
 {
-	struct dw_spi_driver *const driver = bank->driver_priv;
-
 	int ret = dw_spi_master_ctrl_configure(bank);
 	if (ret)
 		return ret;
 
-	ret = dw_spi_ctrl_read(bank, offset, buffer, count,
-						   driver->spi_flash->read_cmd);
+	ret = dw_spi_read_buffer(bank, buffer, offset, count);
 	dw_spi_master_ctrl_restore(bank);
 	return ret;
 }
@@ -1567,7 +1919,7 @@ static int
 dw_spi_info(struct flash_bank *bank, struct command_invocation *cmd)
 {
 	const struct dw_spi_driver *const driver = bank->driver_priv;
-	command_print(cmd, "model %s", driver->spi_flash->name);
+	command_print(cmd, "model %s", driver->spi_flash.name);
 	command_print(cmd, "ID 0x%" PRIx32, driver->id);
 	command_print_sameline(cmd, "size 0x%" PRIx32, bank->size);
 	return ERROR_OK;

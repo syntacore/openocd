@@ -48,11 +48,22 @@
 /**
  * @brief Return from helper function.
  */
+#if defined(mips) || defined(__mips__) || defined(__mips)
 #define RETURN            \
 	do {                  \
 		asm("sdbbp\n\t"); \
 		return;           \
 	} while (0)
+#elif defined(__riscv) || defined(__riscv32) || \
+	defined(__riscv__) || defined(_riscv__)
+#define RETURN            \
+	do {                  \
+		asm("EBREAK\n\t"); \
+		return;           \
+	} while (0)
+#else
+#error Unsupported architecture
+#endif
 
 /**
  * @brief Append byte to TX FIFO.
