@@ -151,13 +151,13 @@ struct armv8_arch_cache {
 };
 
 struct armv8_cache_common {
-	int info;
+	bool info_valid;
 	int loc;
 	uint32_t iminline;
 	uint32_t dminline;
 	struct armv8_arch_cache arch[6];	/* cache info, L1 - L7 */
-	int i_cache_enabled;
-	int d_u_cache_enabled;
+	bool i_cache_enabled;
+	bool d_u_cache_enabled;
 
 	/* l2 external unified cache if some */
 	void *l2_cache;
@@ -179,7 +179,7 @@ struct armv8_mmu_common {
 	int (*read_physical_memory)(struct target *target, target_addr_t address,
 			uint32_t size, uint32_t count, uint8_t *buffer);
 	struct armv8_cache_common armv8_cache;
-	uint32_t mmu_enabled;
+	bool mmu_enabled;
 };
 
 struct armv8_common {
@@ -194,11 +194,6 @@ struct armv8_common {
 	struct adiv5_ap *debug_ap;
 
 	const uint32_t *opcodes;
-
-	/* mdir */
-	uint8_t multi_processor_system;
-	uint8_t cluster_id;
-	uint8_t cpu_id;
 
 	/* armv8 aarch64 need below information for page translation */
 	uint8_t va_size;
@@ -252,9 +247,6 @@ static inline bool is_armv8(struct armv8_common *armv8)
 #define CPUV8_DBG_DBGFEATURE0	0xD28
 #define CPUV8_DBG_MEMFEATURE0	0xD38
 
-#define CPUV8_DBG_LOCKACCESS 0xFB0
-#define CPUV8_DBG_LOCKSTATUS 0xFB4
-
 #define CPUV8_DBG_EDESR		0x20
 #define CPUV8_DBG_EDECR		0x24
 #define CPUV8_DBG_EDWAR0	0x30
@@ -277,8 +269,6 @@ static inline bool is_armv8(struct armv8_common *armv8)
 #define CPUV8_DBG_VCR		0x01C
 
 #define CPUV8_DBG_OSLAR		0x300
-
-#define CPUV8_DBG_AUTHSTATUS	0xFB8
 
 #define PAGE_SIZE_4KB				0x1000
 #define PAGE_SIZE_4KB_LEVEL0_BITS	39

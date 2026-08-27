@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include "target/arm_coresight.h"
 #include "target/arm_adi_v5.h"
 #include "target/arm_cti.h"
 #include "target/target.h"
@@ -52,10 +53,22 @@ struct arm_cti *cti_instance_by_jim_obj(Jim_Interp *interp, Jim_Obj *o)
 	return NULL;
 }
 
+static void arm_cti_unlock(struct arm_cti *self)
+{
+	/* while the LAR /shouldn't/ affect "accesses that use the external
+	 * debugger interface" according to ARM's docs, it certainly does so,
+	 * at least on NXP's LX2160A
+	 */
+	mem_ap_write_atomic_u32(self->ap, self->spot.base + ARM_CS_LAR,
+				ARM_CS_LAR_UNLOCK_KEY);
+}
+
 static int arm_cti_mod_reg_bits(struct arm_cti *self, unsigned int reg, uint32_t mask, uint32_t value)
 {
 	struct adiv5_ap *ap = self->ap;
 	uint32_t tmp;
+
+	arm_cti_unlock(self);
 
 	/* Read register */
 	int retval = mem_ap_read_atomic_u32(ap, self->spot.base + reg, &tmp);
@@ -75,6 +88,8 @@ int arm_cti_enable(struct arm_cti *self, bool enable)
 {
 	uint32_t val = enable ? 1 : 0;
 
+	arm_cti_unlock(self);
+
 	return mem_ap_write_atomic_u32(self->ap, self->spot.base + CTI_CTR, val);
 }
 
@@ -83,6 +98,8 @@ int arm_cti_ack_events(struct arm_cti *self, uint32_t event)
 	struct adiv5_ap *ap = self->ap;
 	int retval;
 	uint32_t tmp;
+
+	arm_cti_unlock(self);
 
 	retval = mem_ap_write_atomic_u32(ap, self->spot.base + CTI_INACK, event);
 	if (retval == ERROR_OK) {
@@ -122,6 +139,8 @@ int arm_cti_ungate_channel(struct arm_cti *self, uint32_t channel)
 
 int arm_cti_write_reg(struct arm_cti *self, unsigned int reg, uint32_t value)
 {
+	arm_cti_unlock(self);
+
 	return mem_ap_write_atomic_u32(self->ap, self->spot.base + reg, value);
 }
 
@@ -190,6 +209,9 @@ static const struct {
 	{ CTI_APPPULSE,	"APPPULSE" },
 	{ CTI_INACK,	"INACK" },
 	{ CTI_DEVCTL,	"DEVCTL" },
+	{ ARM_CS_LAR,	"LAR" },
+	{ ARM_CS_LSR,	"LSR" },
+	{ ARM_CS_AUTHSTATUS,	"AUTHSTATUS" },
 };
 
 static int cti_find_reg_offset(const char *name)
@@ -232,13 +254,13 @@ COMMAND_HANDLER(handle_cti_dump)
 		retval = dap_run(ap->dap);
 
 	if (retval != ERROR_OK)
-		return JIM_ERR;
+		return retval;
 
 	for (size_t i = 0; i < ARRAY_SIZE(cti_names); i++)
 		command_print(CMD, "%8.8s (0x%04"PRIx32") 0x%08"PRIx32,
 				cti_names[i].label, cti_names[i].offset, values[i]);
 
-	return JIM_OK;
+	return ERROR_OK;
 }
 
 COMMAND_HANDLER(handle_cti_enable)
@@ -434,49 +456,47 @@ static int cti_configure(struct jim_getopt_info *goi, struct arm_cti *cti)
 	return JIM_OK;
 }
 
-static int cti_create(struct jim_getopt_info *goi)
+COMMAND_HANDLER(handle_cti_create)
 {
-	struct command_context *cmd_ctx;
-	static struct arm_cti *cti;
-	Jim_Obj *new_cmd;
-	Jim_Cmd *cmd;
-	const char *cp;
-	int e;
+	if (CMD_ARGC < 3)
+		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	cmd_ctx = current_command_context(goi->interp);
-	assert(cmd_ctx);
-
-	if (goi->argc < 3) {
-		Jim_WrongNumArgs(goi->interp, 1, goi->argv, "?name? ..options...");
-		return JIM_ERR;
-	}
-	/* COMMAND */
-	jim_getopt_obj(goi, &new_cmd);
-	/* does this command exist? */
-	cmd = Jim_GetCommand(goi->interp, new_cmd, JIM_NONE);
-	if (cmd) {
-		cp = Jim_GetString(new_cmd, NULL);
-		Jim_SetResultFormatted(goi->interp, "Command: %s Exists", cp);
-		return JIM_ERR;
+	/* check if the cti name clashes with an existing command name */
+	Jim_Cmd *jimcmd = Jim_GetCommand(CMD_CTX->interp, CMD_JIMTCL_ARGV[0], JIM_NONE);
+	if (jimcmd) {
+		command_print(CMD, "Command/cti: %s Exists", CMD_ARGV[0]);
+		return ERROR_FAIL;
 	}
 
 	/* Create it */
-	cti = calloc(1, sizeof(*cti));
-	if (!cti)
-		return JIM_ERR;
+	struct arm_cti *cti = calloc(1, sizeof(*cti));
+	if (!cti) {
+		LOG_ERROR("Out of memory");
+		return ERROR_FAIL;
+	}
 
 	adiv5_mem_ap_spot_init(&cti->spot);
 
 	/* Do the rest as "configure" options */
-	goi->is_configure = true;
-	e = cti_configure(goi, cti);
+	struct jim_getopt_info goi;
+	jim_getopt_setup(&goi, CMD_CTX->interp, CMD_ARGC - 1, CMD_JIMTCL_ARGV + 1);
+	goi.is_configure = 1;
+	int e = cti_configure(&goi, cti);
 	if (e != JIM_OK) {
+		int reslen;
+		const char *result = Jim_GetString(Jim_GetResult(CMD_CTX->interp), &reslen);
+		if (reslen > 0)
+			command_print(CMD, "%s", result);
 		free(cti);
-		return e;
+		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
-	cp = Jim_GetString(new_cmd, NULL);
-	cti->name = strdup(cp);
+	cti->name = strdup(CMD_ARGV[0]);
+	if (!cti->name) {
+		LOG_ERROR("Out of memory");
+		free(cti);
+		return ERROR_FAIL;
+	}
 
 	/* now - create the new cti name command */
 	const struct command_registration cti_subcommands[] = {
@@ -487,7 +507,7 @@ static int cti_create(struct jim_getopt_info *goi)
 	};
 	const struct command_registration cti_commands[] = {
 		{
-			.name = cp,
+			.name = CMD_ARGV[0],
 			.mode = COMMAND_ANY,
 			.help = "cti instance command group",
 			.usage = "",
@@ -495,31 +515,24 @@ static int cti_create(struct jim_getopt_info *goi)
 		},
 		COMMAND_REGISTRATION_DONE
 	};
-	e = register_commands_with_data(cmd_ctx, NULL, cti_commands, cti);
-	if (e != ERROR_OK)
-		return JIM_ERR;
+	int retval = register_commands_with_data(CMD_CTX, NULL, cti_commands, cti);
+	if (retval != ERROR_OK) {
+		free(cti->name);
+		free(cti);
+		return retval;
+	}
 
 	list_add_tail(&cti->lh, &all_cti);
 
 	cti->ap = dap_get_ap(cti->spot.dap, cti->spot.ap_num);
 	if (!cti->ap) {
-		Jim_SetResultString(goi->interp, "Cannot get AP", -1);
-		return JIM_ERR;
+		command_print(CMD, "Cannot get AP");
+		free(cti->name);
+		free(cti);
+		return ERROR_FAIL;
 	}
 
-	return JIM_OK;
-}
-
-static int jim_cti_create(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
-{
-	struct jim_getopt_info goi;
-	jim_getopt_setup(&goi, interp, argc - 1, argv + 1);
-	if (goi.argc < 2) {
-		Jim_WrongNumArgs(goi.interp, goi.argc, goi.argv,
-			"<name> [<cti_options> ...]");
-		return JIM_ERR;
-	}
-	return cti_create(&goi);
+	return ERROR_OK;
 }
 
 COMMAND_HANDLER(cti_handle_names)
@@ -539,7 +552,7 @@ static const struct command_registration cti_subcommand_handlers[] = {
 	{
 		.name = "create",
 		.mode = COMMAND_ANY,
-		.jim_handler = jim_cti_create,
+		.handler = handle_cti_create,
 		.usage = "name '-chain-position' name [options ...]",
 		.help = "Creates a new CTI object",
 	},

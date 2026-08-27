@@ -21,9 +21,6 @@
 #include <jtag/interface.h>
 #include "bitbang.h"
 
-/* arbitrary limit on host name length: */
-#define REMOTE_BITBANG_HOST_MAX 255
-
 static char *remote_bitbang_host;
 static char *remote_bitbang_port;
 
@@ -179,14 +176,14 @@ static int remote_bitbang_quit(void)
 static enum bb_value char_to_int(int c)
 {
 	switch (c) {
-		case '0':
-			return BB_LOW;
-		case '1':
-			return BB_HIGH;
-		default:
-			remote_bitbang_quit();
-			LOG_ERROR("remote_bitbang: invalid read response: %c(%i)", c, c);
-			return BB_ERROR;
+	case '0':
+		return BB_LOW;
+	case '1':
+		return BB_HIGH;
+	default:
+		remote_bitbang_quit();
+		LOG_ERROR("remote_bitbang: invalid read response: %c(%i)", c, c);
+		return BB_ERROR;
 	}
 }
 

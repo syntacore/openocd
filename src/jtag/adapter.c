@@ -34,12 +34,18 @@ enum adapter_clk_mode {
 
 #define DEFAULT_CLOCK_SPEED_KHZ		100U
 
+#define MAX_USB_IDS 16
+
 /**
  * Adapter configuration
  */
 static struct {
 	bool adapter_initialized;
 	char *usb_location;
+	// vid = pid = 0 marks the end of the list.
+	uint16_t usb_vids[MAX_USB_IDS + 1];
+	uint16_t usb_pids[MAX_USB_IDS + 1];
+	char *product_name;
 	char *serial;
 	enum adapter_clk_mode clock_mode;
 	int speed_khz;
@@ -53,17 +59,19 @@ static const struct gpio_map {
 	enum adapter_gpio_direction direction;
 	bool permit_drive_option;
 	bool permit_init_state_option;
+	bool permit_exit_state_option;
 } gpio_map[ADAPTER_GPIO_IDX_NUM] = {
-	[ADAPTER_GPIO_IDX_TDO] = { "tdo", ADAPTER_GPIO_DIRECTION_INPUT, false, true, },
-	[ADAPTER_GPIO_IDX_TDI] = { "tdi", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, },
-	[ADAPTER_GPIO_IDX_TMS] = { "tms", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, },
-	[ADAPTER_GPIO_IDX_TCK] = { "tck", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, },
-	[ADAPTER_GPIO_IDX_SWDIO] = { "swdio", ADAPTER_GPIO_DIRECTION_BIDIRECTIONAL, true, true, },
-	[ADAPTER_GPIO_IDX_SWDIO_DIR] = { "swdio_dir", ADAPTER_GPIO_DIRECTION_OUTPUT, true, false, },
-	[ADAPTER_GPIO_IDX_SWCLK] = { "swclk", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, },
-	[ADAPTER_GPIO_IDX_TRST] = { "trst", ADAPTER_GPIO_DIRECTION_OUTPUT, false, true, },
-	[ADAPTER_GPIO_IDX_SRST] = { "srst", ADAPTER_GPIO_DIRECTION_OUTPUT, false, true, },
-	[ADAPTER_GPIO_IDX_LED] = { "led", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, },
+	[ADAPTER_GPIO_IDX_TDO] = { "tdo", ADAPTER_GPIO_DIRECTION_INPUT, false, true, true },
+	[ADAPTER_GPIO_IDX_TDI] = { "tdi", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, true },
+	[ADAPTER_GPIO_IDX_TMS] = { "tms", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, true },
+	[ADAPTER_GPIO_IDX_TCK] = { "tck", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, true },
+	[ADAPTER_GPIO_IDX_SWDIO] = { "swdio", ADAPTER_GPIO_DIRECTION_BIDIRECTIONAL, true, true, true },
+	[ADAPTER_GPIO_IDX_SWDIO_DIR] = { "swdio_dir", ADAPTER_GPIO_DIRECTION_OUTPUT, true, false, false },
+	[ADAPTER_GPIO_IDX_SWCLK] = { "swclk", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, true },
+	[ADAPTER_GPIO_IDX_TRST] = { "trst", ADAPTER_GPIO_DIRECTION_OUTPUT, false, true, true },
+	[ADAPTER_GPIO_IDX_SRST] = { "srst", ADAPTER_GPIO_DIRECTION_OUTPUT, false, true, true },
+	[ADAPTER_GPIO_IDX_LED] = { "led", ADAPTER_GPIO_DIRECTION_OUTPUT, true, true, true },
+	[ADAPTER_GPIO_IDX_USER0] = { "user0", ADAPTER_GPIO_DIRECTION_BIDIRECTIONAL, true, true, true },
 };
 
 static int adapter_config_khz(unsigned int khz);
@@ -194,6 +202,7 @@ int adapter_quit(void)
 
 	free(adapter_config.serial);
 	free(adapter_config.usb_location);
+	free(adapter_config.product_name);
 
 	struct jtag_tap *t = jtag_all_taps();
 	while (t) {
@@ -269,15 +278,15 @@ int adapter_config_rclk(unsigned int fallback_speed_khz)
 int adapter_get_speed(int *speed)
 {
 	switch (adapter_config.clock_mode) {
-		case CLOCK_MODE_KHZ:
-			adapter_khz_to_speed(adapter_get_speed_khz(), speed);
-			break;
-		case CLOCK_MODE_RCLK:
-			adapter_rclk_to_speed(adapter_config.rclk_fallback_speed_khz, speed);
-			break;
-		default:
-			LOG_ERROR("BUG: unknown adapter clock mode");
-			return ERROR_FAIL;
+	case CLOCK_MODE_KHZ:
+		adapter_khz_to_speed(adapter_get_speed_khz(), speed);
+		break;
+	case CLOCK_MODE_RCLK:
+		adapter_rclk_to_speed(adapter_config.rclk_fallback_speed_khz, speed);
+		break;
+	default:
+		LOG_ERROR("BUG: unknown adapter clock mode");
+		return ERROR_FAIL;
 	}
 	return ERROR_OK;
 }
@@ -323,9 +332,24 @@ static void adapter_usb_set_location(const char *location)
 }
 #endif /* HAVE_LIBUSB_GET_PORT_NUMBERS */
 
+const uint16_t *adapter_usb_get_vids(void)
+{
+	return adapter_config.usb_vids;
+}
+
+const uint16_t *adapter_usb_get_pids(void)
+{
+	return adapter_config.usb_pids;
+}
+
 const char *adapter_usb_get_location(void)
 {
 	return adapter_config.usb_location;
+}
+
+const char *adapter_usb_get_product_name(void)
+{
+	return adapter_config.product_name;
 }
 
 bool adapter_usb_location_equal(uint8_t dev_bus, uint8_t *port_path, size_t path_len)
@@ -613,34 +637,34 @@ next:
 
 	/* minimal JTAG has neither SRST nor TRST (so that's the default) */
 	switch (new_cfg & (RESET_HAS_TRST | RESET_HAS_SRST)) {
-		case RESET_HAS_SRST:
-			modes[0] = "srst_only";
-			break;
-		case RESET_HAS_TRST:
-			modes[0] = "trst_only";
-			break;
-		case RESET_TRST_AND_SRST:
-			modes[0] = "trst_and_srst";
-			break;
-		default:
-			modes[0] = "none";
-			break;
+	case RESET_HAS_SRST:
+		modes[0] = "srst_only";
+		break;
+	case RESET_HAS_TRST:
+		modes[0] = "trst_only";
+		break;
+	case RESET_TRST_AND_SRST:
+		modes[0] = "trst_and_srst";
+		break;
+	default:
+		modes[0] = "none";
+		break;
 	}
 
 	/* normally SRST and TRST are decoupled; but bugs happen ... */
 	switch (new_cfg & (RESET_SRST_PULLS_TRST | RESET_TRST_PULLS_SRST)) {
-		case RESET_SRST_PULLS_TRST:
-			modes[1] = "srst_pulls_trst";
-			break;
-		case RESET_TRST_PULLS_SRST:
-			modes[1] = "trst_pulls_srst";
-			break;
-		case RESET_SRST_PULLS_TRST | RESET_TRST_PULLS_SRST:
-			modes[1] = "combined";
-			break;
-		default:
-			modes[1] = "separate";
-			break;
+	case RESET_SRST_PULLS_TRST:
+		modes[1] = "srst_pulls_trst";
+		break;
+	case RESET_TRST_PULLS_SRST:
+		modes[1] = "trst_pulls_srst";
+		break;
+	case RESET_SRST_PULLS_TRST | RESET_TRST_PULLS_SRST:
+		modes[1] = "combined";
+		break;
+	default:
+		modes[1] = "separate";
+		break;
 	}
 
 	/* TRST-less connectors include Altera, Xilinx, and minimal JTAG */
@@ -850,6 +874,7 @@ static COMMAND_HELPER(helper_adapter_gpio_print_config, enum adapter_gpio_config
 	const char *drive = "";
 	const char *pull = "";
 	const char *init_state = "";
+	const char *exit_state = "";
 
 	if (gpio_config->gpio_num == ADAPTER_GPIO_NOT_SET) {
 		command_print(CMD, "adapter gpio %s: not configured", gpio_map[gpio_idx].name);
@@ -908,9 +933,27 @@ static COMMAND_HELPER(helper_adapter_gpio_print_config, enum adapter_gpio_config
 		}
 	}
 
-	command_print(CMD, "adapter gpio %s (%s): num %u, chip %d, active-%s%s%s%s",
+	if (gpio_map[gpio_idx].permit_exit_state_option) {
+		switch (gpio_config->exit_state) {
+		case ADAPTER_GPIO_EXIT_STATE_NO_CHANGE:
+			exit_state = ", exit-state no-change";
+			break;
+		case ADAPTER_GPIO_EXIT_STATE_INACTIVE:
+			exit_state = ", exit-state inactive";
+			break;
+		case ADAPTER_GPIO_EXIT_STATE_ACTIVE:
+			exit_state = ", exit-state active";
+			break;
+		case ADAPTER_GPIO_EXIT_STATE_INPUT:
+			exit_state = ", exit-state input";
+			break;
+		}
+	}
+
+
+	command_print(CMD, "adapter gpio %s (%s): num %u, chip %d, active-%s%s%s%s%s",
 		gpio_map[gpio_idx].name, dir, gpio_config->gpio_num, (int)gpio_config->chip_num, active_state,
-		drive, pull, init_state);
+		drive, pull, init_state, exit_state);
 
 	return ERROR_OK;
 }
@@ -936,8 +979,8 @@ COMMAND_HANDLER(adapter_gpio_config_handler)
 
 	int gpio_idx = get_gpio_index(CMD_ARGV[0]);
 	if (gpio_idx == -1) {
-		LOG_ERROR("adapter has no gpio named %s", CMD_ARGV[0]);
-		return ERROR_COMMAND_SYNTAX_ERROR;
+		command_print(CMD, "adapter has no gpio named %s", CMD_ARGV[0]);
+		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
 	if (CMD_ARGC == 1) {
@@ -949,7 +992,7 @@ COMMAND_HANDLER(adapter_gpio_config_handler)
 	while (i < CMD_ARGC) {
 		LOG_DEBUG("Processing %s", CMD_ARGV[i]);
 
-		if (isdigit(*CMD_ARGV[i])) {
+		if (isdigit((unsigned char)*CMD_ARGV[i])) {
 			COMMAND_PARSE_NUMBER(uint, CMD_ARGV[i], gpio_config->gpio_num);
 			++i;
 			continue;
@@ -1031,9 +1074,34 @@ COMMAND_HANDLER(adapter_gpio_config_handler)
 			}
 		}
 
-		LOG_ERROR("illegal option for adapter %s %s: %s",
+		if (gpio_map[gpio_idx].permit_exit_state_option) {
+			if (strcmp(CMD_ARGV[i], "-exit-no-change") == 0) {
+				++i;
+				gpio_config->exit_state = ADAPTER_GPIO_EXIT_STATE_NO_CHANGE;
+				continue;
+			}
+			if (strcmp(CMD_ARGV[i], "-exit-inactive") == 0) {
+				++i;
+				gpio_config->exit_state = ADAPTER_GPIO_EXIT_STATE_INACTIVE;
+				continue;
+			}
+			if (strcmp(CMD_ARGV[i], "-exit-active") == 0) {
+				++i;
+				gpio_config->exit_state = ADAPTER_GPIO_EXIT_STATE_ACTIVE;
+				continue;
+			}
+
+			if (gpio_map[gpio_idx].direction == ADAPTER_GPIO_DIRECTION_BIDIRECTIONAL &&
+					strcmp(CMD_ARGV[i], "-exit-input") == 0) {
+				++i;
+				gpio_config->exit_state = ADAPTER_GPIO_EXIT_STATE_INPUT;
+				continue;
+			}
+		}
+
+		command_print(CMD, "illegal option for adapter %s %s: %s",
 				CMD_NAME, gpio_map[gpio_idx].name, CMD_ARGV[i]);
-		return ERROR_COMMAND_SYNTAX_ERROR;
+		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
 	/* Force swdio_dir init state to be compatible with swdio init state */
@@ -1058,7 +1126,61 @@ COMMAND_HANDLER(handle_usb_location_command)
 }
 #endif /* HAVE_LIBUSB_GET_PORT_NUMBERS */
 
+COMMAND_HANDLER(handle_usb_vid_pid_command)
+{
+	if (MAX_USB_IDS * 2 < CMD_ARGC) {
+		LOG_WARNING("ignoring extra IDs in vid_pid "
+			"(maximum is %d pairs)", MAX_USB_IDS);
+		CMD_ARGC = MAX_USB_IDS * 2;
+	}
+
+	if (CMD_ARGC < 2 || (CMD_ARGC & 1)) {
+		LOG_WARNING("incomplete vid_pid configuration directive");
+		return ERROR_COMMAND_SYNTAX_ERROR;
+	}
+
+	unsigned int i;
+	for (i = 0; i < CMD_ARGC; i += 2) {
+		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i], adapter_config.usb_vids[i / 2]);
+		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i + 1], adapter_config.usb_pids[i / 2]);
+	}
+
+	/* null termination */
+	adapter_config.usb_vids[i / 2] = 0;
+	adapter_config.usb_pids[i / 2] = 0;
+
+	return ERROR_OK;
+}
+
+COMMAND_HANDLER(handle_usb_product_name_command)
+{
+	if (CMD_ARGC != 1)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	free(adapter_config.product_name);
+	adapter_config.product_name = NULL;
+
+	if (*CMD_ARGV[0])
+		adapter_config.product_name = strdup(CMD_ARGV[0]);
+
+	return ERROR_OK;
+}
+
 static const struct command_registration adapter_usb_command_handlers[] = {
+	{
+		.name = "vid_pid",
+		.handler = &handle_usb_vid_pid_command,
+		.mode = COMMAND_CONFIG,
+		.help = "set the USB VID and PID of the USB device",
+		.usage = "(vid pid)*",
+	},
+	{
+		.name = "product_name",
+		.handler = &handle_usb_product_name_command,
+		.mode = COMMAND_CONFIG,
+		.help = "set the USB product name of the USB device",
+		.usage = "name",
+	},
 #ifdef HAVE_LIBUSB_GET_PORT_NUMBERS
 	{
 		.name = "location",
@@ -1168,7 +1290,8 @@ static const struct command_registration adapter_command_handlers[] = {
 			"[-active-high|-active-low] "
 			"[-push-pull|-open-drain|-open-source] "
 			"[-pull-none|-pull-up|-pull-down]"
-			"[-init-inactive|-init-active|-init-input] ]",
+			"[-init-inactive|-init-active|-init-input] ]"
+			"[-exit-no-change|-exit-inactive|-exit-active|-exit-input] ]",
 	},
 	COMMAND_REGISTRATION_DONE
 };

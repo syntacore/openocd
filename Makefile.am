@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-# not a GNU package. You can remove this line, if
-# have all needed files, that a GNU package needs
-AUTOMAKE_OPTIONS = gnu 1.6
+AUTOMAKE_OPTIONS = foreign 1.14
 
 .DELETE_ON_ERROR:
 
@@ -28,11 +26,11 @@ dist_man_MANS =
 EXTRA_DIST =
 DISTCLEANFILES =
 
-SUBDIRS += testing
-DIST_SUBDIRS += testing
-
 SUBDIRS += tools/syntacore
 DIST_SUBDIRS += tools/syntacore
+
+SUBDIRS += testing
+DIST_SUBDIRS += testing
 
 # common flags used in openocd build
 AM_CFLAGS = $(GCC_WARNINGS)
@@ -54,11 +52,12 @@ EXTRA_DIST += \
 	BUGS \
 	HACKING \
 	NEWTAPS \
-	README.Windows \
-	README.macOS \
+	README.Windows.md \
+	README.macOS.md \
 	$(EXTRA_DIST_NEWS) \
 	Doxyfile.in \
 	LICENSES/license-rules.txt \
+	LICENSES/dual/CC-BY-4.0 \
 	LICENSES/exceptions/eCos-exception-2.0 \
 	LICENSES/preferred/BSD-1-Clause \
 	LICENSES/preferred/BSD-2-Clause \

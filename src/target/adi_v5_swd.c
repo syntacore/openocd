@@ -39,6 +39,7 @@
 #include <helper/time_support.h>
 
 #include <transport/transport.h>
+#include <jtag/adapter.h>
 #include <jtag/interface.h>
 
 #include <jtag/swd.h>
@@ -699,7 +700,7 @@ static const struct command_registration swd_commands[] = {
 		.help = "declare a new SWD DAP",
 		.usage = "basename dap_type ['-irlen' count] "
 			"['-enable'|'-disable'] "
-			"['-expected_id' number] "
+			"['-expected-id' number] "
 			"['-ignore-version'] "
 			"['-ignore-bypass'] "
 			"['-ircapture' number] "
@@ -722,8 +723,6 @@ static const struct command_registration swd_handlers[] = {
 
 static int swd_select(struct command_context *ctx)
 {
-	/* FIXME: only place where global 'adapter_driver' is still needed */
-	extern struct adapter_driver *adapter_driver;
 	const struct swd_driver *swd = adapter_driver->swd_ops;
 	int retval;
 
