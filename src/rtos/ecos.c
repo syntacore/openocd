@@ -510,7 +510,7 @@ static bool ecos_escape_string(const char *raw, char *out, size_t limit)
 			continue;
 		}
 
-		char *fidx = strchr(tokens, *raw);
+		const char *fidx = strchr(tokens, *raw);
 		if (!fidx) {
 			/* Should never happen assuming xmlchars
 			 * vector and tokens string match. */
@@ -539,7 +539,7 @@ static int ecos_check_app_info(struct rtos *rtos, struct ecos_params *param)
 		return -1;
 
 	if (param->flush_common) {
-		if (debug_level >= LOG_LVL_DEBUG) {
+		if (LOG_LEVEL_IS(LOG_LVL_DEBUG)) {
 			for (unsigned int idx = 0; idx < ARRAY_SIZE(ecos_symbol_list); idx++) {
 				LOG_DEBUG("eCos: %s 0x%016" PRIX64 " %s",
 					rtos->symbols[idx].optional ? "OPTIONAL" : "        ",
@@ -659,8 +659,6 @@ static int ecos_stack_layout_cortexm(struct rtos *rtos,
 static int ecos_stack_layout_arm(struct rtos *rtos, struct ecos_params *param,
 		int64_t stack_ptr, const struct rtos_register_stacking **si)
 {
-	int retval = ERROR_OK;
-
 	if (!param->stacking_info && ecos_value(rtos, ECOS_VAL_ARM_REGSIZE)) {
 		/* When OpenOCD is extended to allow FPU registers to be returned from a
 		 * stacked thread context we can check:
@@ -695,7 +693,7 @@ static int ecos_stack_layout_arm(struct rtos *rtos, struct ecos_params *param,
 	if (si)
 		*si = param->stacking_info;
 
-	return retval;
+	return ERROR_OK;
 }
 
 /* We see this function called on a new connection, it looks like before and
@@ -1004,7 +1002,7 @@ static int ecos_update_threads(struct rtos *rtos)
 		if (tr_extra && reason_desc)
 			soff += snprintf(&eistr[soff], (eilen - soff), " (%s)", reason_desc);
 		if (pri_extra)
-			(void)snprintf(&eistr[soff], (eilen - soff), ", Priority: %" PRId64 "", priority);
+			(void)snprintf(&eistr[soff], (eilen - soff), ", Priority: %" PRId64, priority);
 		rtos->thread_details[tasks_found].extra_info_str = eistr;
 
 		rtos->thread_details[tasks_found].exists = true;
@@ -1073,7 +1071,7 @@ static int ecos_get_thread_reg_list(struct rtos *rtos, int64_t thread_id,
 				param->uid_width,
 				(uint8_t *)&id);
 		if (retval != ERROR_OK) {
-			LOG_ERROR("Error reading unique id from eCos thread 0x%08" PRIX32 "", thread_index);
+			LOG_ERROR("Error reading unique id from eCos thread 0x%08" PRIX32, thread_index);
 			return retval;
 		}
 

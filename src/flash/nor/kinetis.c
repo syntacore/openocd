@@ -1224,7 +1224,6 @@ static int kinetis_disable_wdog(struct kinetis_chip *k_chip)
 
 COMMAND_HANDLER(kinetis_disable_wdog_handler)
 {
-	int result;
 	struct target *target = get_current_target(CMD_CTX);
 	struct kinetis_chip *k_chip = kinetis_get_chip(target);
 
@@ -1234,8 +1233,7 @@ COMMAND_HANDLER(kinetis_disable_wdog_handler)
 	if (CMD_ARGC > 0)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	result = kinetis_disable_wdog(k_chip);
-	return result;
+	return kinetis_disable_wdog(k_chip);
 }
 
 
@@ -1589,8 +1587,7 @@ static int kinetis_read_pmstat(struct kinetis_chip *k_chip, uint8_t *pmstat)
 
 	switch (k_chip->sysmodectrlr_type) {
 	case KINETIS_SMC:
-		result = target_read_u8(target, SMC_PMSTAT, pmstat);
-		return result;
+		return target_read_u8(target, SMC_PMSTAT, pmstat);
 
 	case KINETIS_SMC32:
 		result = target_read_u32(target, SMC32_PMSTAT, &stat32);
@@ -2145,24 +2142,24 @@ static int kinetis_probe_chip_s32k(struct kinetis_chip *k_chip)
 		k_chip->max_flash_prog_size = 512;
 
 		switch (k_chip->sim_sdid & KINETIS_SDID_S32K_DERIVATE_MASK) {
-			case KINETIS_SDID_S32K_DERIVATE_KXX6:
-				/* S32K116 CPU 48Mhz Flash 128KB RAM 17KB+2KB */
-				/* Non-Interleaved */
-				k_chip->pflash_size = 128 << 10;
-				k_chip->pflash_sector_size = 2 << 10;
-				/* Non-Interleaved */
-				k_chip->nvm_size = 32 << 10;
-				k_chip->nvm_sector_size = 2 << 10;
-				break;
-			case KINETIS_SDID_S32K_DERIVATE_KXX8:
-				/* S32K118 CPU 80Mhz Flash 256KB+32KB RAM 32KB+4KB */
-				/* Non-Interleaved */
-				k_chip->pflash_size = 256 << 10;
-				k_chip->pflash_sector_size = 2 << 10;
-				/* Non-Interleaved */
-				k_chip->nvm_size = 32 << 10;
-				k_chip->nvm_sector_size = 2 << 10;
-				break;
+		case KINETIS_SDID_S32K_DERIVATE_KXX6:
+			/* S32K116 CPU 48Mhz Flash 128KB RAM 17KB+2KB */
+			/* Non-Interleaved */
+			k_chip->pflash_size = 128 << 10;
+			k_chip->pflash_sector_size = 2 << 10;
+			/* Non-Interleaved */
+			k_chip->nvm_size = 32 << 10;
+			k_chip->nvm_sector_size = 2 << 10;
+			break;
+		case KINETIS_SDID_S32K_DERIVATE_KXX8:
+			/* S32K118 CPU 80Mhz Flash 256KB+32KB RAM 32KB+4KB */
+			/* Non-Interleaved */
+			k_chip->pflash_size = 256 << 10;
+			k_chip->pflash_sector_size = 2 << 10;
+			/* Non-Interleaved */
+			k_chip->nvm_size = 32 << 10;
+			k_chip->nvm_sector_size = 2 << 10;
+			break;
 		}
 		break;
 

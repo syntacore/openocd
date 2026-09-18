@@ -21,9 +21,4 @@ target_addr_t rtos_cortex_m_stack_align(struct target *target,
 	const uint8_t *stack_data, const struct rtos_register_stacking *stacking,
 	target_addr_t stack_ptr, size_t xpsr_offset);
 
-extern const struct rtos_register_stacking rtos_standard_rv32_stacking;
-extern const struct rtos_register_stacking rtos_standard_rv64_stacking;
-extern const struct rtos_register_stacking rtos_metal_rv32_stacking;
-extern const struct rtos_register_stacking rtos_metal_rv64_stacking;
-
 #endif /* OPENOCD_RTOS_RTOS_STANDARD_STACKINGS_H */

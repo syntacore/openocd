@@ -77,6 +77,20 @@
 #define SYSCTL_BASE                     0x400AF000
 #define SYSCTL_SECCFG_SECSTATUS         (SYSCTL_BASE + 0x00003048)
 
+/*
+ * SYSCTL SOCLOCK MCLKCFG register (offset 0x1104 from SYSCTL_BASE).
+ * Used for the FLASH_ERR_01 workaround: accessing FACTORYREGION while MCLK
+ * is sourced from HSCLK (SYSPLL/HFXT, implying MCLK > 32 MHz) with flash
+ * wait-state 2 active causes a hard fault on MSPM0G devices.  The flash
+ * controller enforces its wait-state timing for all AHB masters, including
+ * the DAP AHB-AP used by OpenOCD.  Temporarily switching MCLK to SYSOSC
+ * (≤ 32 MHz on all MSPM0 variants) before reading FACTORYREGION avoids this.
+ */
+#define SYSCTL_MCLKCFG                  (SYSCTL_BASE + 0x00001104)
+#define SYSCTL_MCLKCFG_USEHSCLK        BIT(16)
+#define SYSCTL_MCLKCFG_FLASHWAIT_MASK  GENMASK(11, 8)
+#define SYSCTL_MCLKCFG_FLASHWAIT_2     (2U << 8)
+
 /* TI manufacturer ID */
 #define TI_MANUFACTURER_ID              0x17
 
@@ -128,6 +142,7 @@ struct mspm0_family_info {
 
 /* https://www.ti.com/lit/ds/symlink/mspm0l1346.pdf Table 8-13 and so on */
 static const struct mspm0_part_info mspm0l_parts[] = {
+	/* MSPM0L110x */
 	{ "MSPM0L1105TDGS20R", 0x51DB, 0x16 },
 	{ "MSPM0L1105TDGS28R", 0x51DB, 0x83 },
 	{ "MSPM0L1105TDYYR", 0x51DB, 0x54 },
@@ -138,6 +153,7 @@ static const struct mspm0_part_info mspm0l_parts[] = {
 	{ "MSPM0L1106TDYYR", 0x5552, 0x9D },
 	{ "MSPM0L1106TRGER", 0x5552, 0x90 },
 	{ "MSPM0L1106TRHBR", 0x5552, 0x53 },
+	/* MSPM0L130x (covers MSPM0L134x) */
 	{ "MSPM0L1303SRGER", 0xef0, 0x17 },
 	{ "MSPM0L1303TRGER", 0xef0, 0xe2 },
 	{ "MSPM0L1304QDGS20R", 0xd717, 0x91 },
@@ -188,20 +204,24 @@ static const struct mspm0_part_info mspm0l_parts[] = {
 	{ "MSPM0L1346TDGS28R", 0xf2b5, 0xef },
 };
 
-/* https://www.ti.com/lit/ds/symlink/mspm0g3506.pdf Table 8-20 */
-static const struct mspm0_part_info mspm0g_parts[] = {
+/* https://www.ti.com/lit/ds/symlink/mspm0g3506.pdf Table 8-22 */
+static const struct mspm0_part_info mspm0g_parts_bb88[] = {
+	/* MSPM0G110x */
 	{ "MSPM0G1105TPTR", 0x8934, 0xD },
 	{ "MSPM0G1105TRGZR", 0x8934, 0xFE },
 	{ "MSPM0G1106TPMR", 0x477B, 0xD4 },
 	{ "MSPM0G1106TPTR", 0x477B, 0x71 },
 	{ "MSPM0G1106TRGZR", 0x477B, 0xBB },
-	{ "MSPM0G1106TRHBR", 0x477B, 0x0 },
+	{ "MSPM0G1106TRHBR", 0x477B, 0x01 },
+	{ "MSPM0G1106TYCJR", 0x477B, 0x09 },
 	{ "MSPM0G1107TDGS28R", 0x807B, 0x82 },
 	{ "MSPM0G1107TPMR", 0x807B, 0xB3 },
 	{ "MSPM0G1107TPTR", 0x807B, 0x32 },
 	{ "MSPM0G1107TRGER", 0x807B, 0x79 },
 	{ "MSPM0G1107TRGZR", 0x807B, 0x20 },
 	{ "MSPM0G1107TRHBR", 0x807B, 0xBC },
+	{ "MSPM0G1107TYCJR", 0x807B, 0x7A },
+	/* MSPM0G150x */
 	{ "MSPM0G1505SDGS28R", 0x13C4, 0x73 },
 	{ "MSPM0G1505SPMR", 0x13C4, 0x53 },
 	{ "MSPM0G1505SPTR", 0x13C4, 0x3E },
@@ -213,11 +233,16 @@ static const struct mspm0_part_info mspm0g_parts[] = {
 	{ "MSPM0G1506SRGER", 0x5AE0, 0x67 },
 	{ "MSPM0G1506SRGZR", 0x5AE0, 0x75 },
 	{ "MSPM0G1506SRHBR", 0x5AE0, 0x57 },
+	{ "MSPM0G1506SRPTR", 0x5AE0, 0x36 },
+	{ "MSPM0G1506SYCJR", 0x5AE0, 0x9E },
 	{ "MSPM0G1507SDGS28R", 0x2655, 0x6D },
 	{ "MSPM0G1507SPMR", 0x2655, 0x97 },
+	{ "MSPM0G1507SPTR", 0x2655, 0x2E },
 	{ "MSPM0G1507SRGER", 0x2655, 0x83 },
 	{ "MSPM0G1507SRGZR", 0x2655, 0xD3 },
 	{ "MSPM0G1507SRHBR", 0x2655, 0x4D },
+	{ "MSPM0G1507SYCJR", 0x2655, 0x65 },
+	/* MSPM0G310x */
 	{ "MSPM0G3105SDGS20R", 0x4749, 0x21 },
 	{ "MSPM0G3105SDGS28R", 0x4749, 0xDD },
 	{ "MSPM0G3105SRHBR", 0x4749, 0xBE },
@@ -227,12 +252,12 @@ static const struct mspm0_part_info mspm0g_parts[] = {
 	{ "MSPM0G3107SDGS20R", 0xAB39, 0x5C },
 	{ "MSPM0G3107SDGS28R", 0xAB39, 0xCC },
 	{ "MSPM0G3107SRHBR", 0xAB39, 0xB7 },
+	/* MSPM0G350x */
 	{ "MSPM0G3505SDGS28R", 0xc504, 0x8e },
 	{ "MSPM0G3505SPMR", 0xc504, 0x1d },
 	{ "MSPM0G3505SPTR", 0xc504, 0x93 },
 	{ "MSPM0G3505SRGZR", 0xc504, 0xc7 },
 	{ "MSPM0G3505SRHBR", 0xc504, 0xe7 },
-	{ "MSPM0G3505TDGS28R", 0xc504, 0xdf },
 	{ "MSPM0G3506SDGS28R", 0x151f, 0x8 },
 	{ "MSPM0G3506SPMR", 0x151f, 0xd4 },
 	{ "MSPM0G3506SPTR", 0x151f, 0x39 },
@@ -243,27 +268,109 @@ static const struct mspm0_part_info mspm0g_parts[] = {
 	{ "MSPM0G3507SPTR", 0xae2d, 0x3f },
 	{ "MSPM0G3507SRGZR", 0xae2d, 0xf7 },
 	{ "MSPM0G3507SRHBR", 0xae2d, 0x4c },
-	{ "M0G3107QPMRQ1", 0x4e2f, 0x51 },
-	{ "M0G3107QPTRQ1", 0x4e2f, 0xc7},
-	{ "M0G3107QRGZRQ1", 0x4e2f, 0x8a },
-	{ "M0G3107QRHBRQ1", 0x4e2f, 0x9a},
-	{ "M0G3107QDGS28RQ1", 0x4e2f, 0xd5},
-	{ "M0G3107QDGS28RQ1", 0x4e2f, 0x67},
-	{ "M0G3107QDGS20RQ1", 0x4e2f, 0xfd},
-	{ "M0G3106QPMRQ1", 0x54C7, 0x08},
-	{ "M0G3105QDGS32RQ1", 0x1349, 0x08},
-	{ "M0G3106QPTRQ1", 0x54C7, 0x3F},
-	{ "M0G3105QDGS28RQ1", 0x1349, 0x1B},
-	{ "M0G3106QRGZRQ1", 0x94AD, 0xE6},
+	/* MSPM0G310x-Q1 */
 	{ "M0G3105QDGS20RQ1", 0x1349, 0xFB},
-	{ "M0G3106QRHBRQ1", 0x94AD, 0x20},
-	{ "M0G3106QDGS32RQ1", 0x94AD, 0x8D},
-	{ "M0G3106QDGS28RQ1", 0x94AD, 0x03},
-	{ "M0G3106QDGS20RQ1", 0x94AD, 0x6F},
+	{ "M0G3105QDGS28RQ1", 0x1349, 0x1B},
+	{ "M0G3105QDGS32RQ1", 0x1349, 0x08},
 	{ "M0G3105QPMRQ1", 0x1349, 0xD0},
 	{ "M0G3105QPTRQ1", 0x1349, 0xEF},
 	{ "M0G3105QRGZRQ1", 0x1349, 0x70},
 	{ "M0G3105QRHBRQ1", 0x1349, 0x01},
+	{ "M0G3106QDGS20RQ1", 0x94AD, 0x6F},
+	{ "M0G3106QDGS28RQ1", 0x94AD, 0x03},
+	{ "M0G3106QDGS32RQ1", 0x94AD, 0x8D},
+	{ "M0G3106QPMRQ1", 0x54C7, 0x08},
+	{ "M0G3106QPTRQ1", 0x54C7, 0x3F},
+	{ "M0G3106QRGZRQ1", 0x94AD, 0xE6},
+	{ "M0G3106QRHBRQ1", 0x94AD, 0x20},
+	{ "M0G3107QDGS20RQ1", 0x4e2f, 0xfd},
+	{ "M0G3107QDGS28RQ1", 0x4e2f, 0x67},
+	{ "M0G3107QDGS28RQ1", 0x4e2f, 0xd5},
+	{ "M0G3107QPMRQ1", 0x4e2f, 0x51 },
+	{ "M0G3107QPTRQ1", 0x4e2f, 0xc7},
+	{ "M0G3107QRGZRQ1", 0x4e2f, 0x8a },
+	{ "M0G3107QRHBRQ1", 0x4e2f, 0x9a},
+	/* MSPM0G350x-Q1 */
+	{ "M0G3505QDGS28RQ1", 0x704E, 0x4C },
+	{ "M0G3505QDGS32RQ1", 0x704E, 0x7F },
+	{ "M0G3505QPMRQ1", 0x704E, 0x7B },
+	{ "M0G3505QPTRQ1", 0x704E, 0x9C },
+	{ "M0G3505QRGZRQ1", 0x704E, 0xC9 },
+	{ "M0G3505QRHBRQ1", 0x704E, 0x26 },
+	{ "M0G3506QDGS28RQ1", 0xEE12, 0x71 },
+	{ "M0G3506QDGS32RQ1", 0xEE12, 0x6C },
+	{ "M0G3506QPMRQ1", 0xEE12, 0x7B },
+	{ "M0G3506QPTRQ1", 0xEE12, 0x5A },
+	{ "M0G3506QRGZRQ1", 0xEE12, 0xD2 },
+	{ "M0G3506QRHBRQ1", 0xEE12, 0xFC },
+	{ "M0G3507QDGS28RQ1", 0x34E0, 0xEA },
+	{ "M0G3507QDGS32RQ1", 0x34E0, 0xF6 },
+	{ "M0G3507QPMRQ1", 0x34E0, 0x26 },
+	{ "M0G3507QRGZRQ1", 0x34E0, 0xC5 },
+	{ "M0G3507QRHBRQ1", 0x34E0, 0xAC },
+	{ "M0G3507QSPTRQ1", 0x34E0, 0xE3 },
+};
+
+/* https://www.ti.com/lit/gpn/mspm0g1518 Table 8-21 and so on */
+static const struct mspm0_part_info mspm0g_parts_bba9[] = {
+	/* MSPM0Gx51x */
+	{ "MSPM0G1518SPMR", 0x2120, 0x13 },
+	{ "MSPM0G1518SPNR", 0x2120, 0x16 },
+	{ "MSPM0G1518SPTR", 0x2120, 0x12 },
+	{ "MSPM0G1518SPZR", 0x2120, 0x18 },
+	{ "MSPM0G1518SRGZR", 0x2120, 0x11 },
+	{ "MSPM0G1518SRHBR", 0x2120, 0x10 },
+	{ "MSPM0G1518SZAWR", 0x2120, 0x19 },
+	{ "MSPM0G1519SPMR", 0x2407, 0x13 },
+	{ "MSPM0G1519SPNR", 0x2407, 0x16 },
+	{ "MSPM0G1519SPTR", 0x2407, 0x12 },
+	{ "MSPM0G1519SPZR", 0x2407, 0x18 },
+	{ "MSPM0G1519SRGZR", 0x2407, 0x11 },
+	{ "MSPM0G1519SRHBR", 0x2407, 0x10 },
+	{ "MSPM0G1519SZAWR", 0x2407, 0x19 },
+	{ "MSPM0G3518SPMR", 0x1205, 0x13 },
+	{ "MSPM0G3518SPNR", 0x1205, 0x15 },
+	{ "MSPM0G3518SPTR", 0x1205, 0x12 },
+	{ "MSPM0G3518SPZR", 0x1205, 0x16 },
+	{ "MSPM0G3518SRGZR", 0x1205, 0x11 },
+	{ "MSPM0G3518SRHBR", 0x1205, 0x10 },
+	{ "MSPM0G3518SZAWR", 0x1205, 0x19 },
+	{ "MSPM0G3519SPMR", 0x1508, 0x13 },
+	{ "MSPM0G3519SPNR", 0x1508, 0x15 },
+	{ "MSPM0G3519SPTR", 0x1508, 0x12 },
+	{ "MSPM0G3519SPZR", 0x1508, 0x16 },
+	{ "MSPM0G3519SRGZR", 0x1508, 0x11 },
+	{ "MSPM0G3519SRHBR", 0x1508, 0x10 },
+	{ "MSPM0G3519SZAWR", 0x1508, 0x19 },
+	/* MSPM0G351x-Q1 */
+	{ "M0G3518QPMRQ1", 0x4009, 0x13 },
+	{ "M0G3518QPNRQ1", 0x4009, 0x14 },
+	{ "M0G3518QPTRQ1", 0x4009, 0x12 },
+	{ "M0G3518QPZRQ1", 0x4009, 0x15 },
+	{ "M0G3518QRGZRQ1", 0x4009, 0x11 },
+	{ "M0G3518QRHBRQ1", 0x4009, 0x10 },
+	{ "M0G3519QPMRQ1", 0x3512, 0x13 },
+	{ "M0G3519AQPMRQ1", 0x3512, 0x16 },
+	{ "M0G3519QPNRQ1", 0x3512, 0x14 },
+	{ "M0G3519QPTRQ1", 0x3512, 0x12 },
+	{ "M0G3519QPZRQ1", 0x3512, 0x15 },
+	{ "M0G3519QRGZRQ1", 0x3512, 0x11 },
+	{ "M0G3519QRHBRQ1", 0x3512, 0x10 },
+	/* MSPM0G352x-Q1 */
+	{ "M0G3529QPMRQ1", 0xF8D1, 0x13 },
+};
+
+/* https://www.ti.com/lit/gpn/mspm0g5187 Table 8-24*/
+static const struct mspm0_part_info mspm0g_parts_bbbc[] = {
+	/* MSPM0G5187 */
+	{ "MSPM0G5187S28YCJR", 0x5610, 0x18 },
+	{ "MSPM0G5187SDGS20R", 0x5610, 0x16 },
+	{ "MSPM0G5187SPMR", 0x5610, 0x10 },
+	{ "MSPM0G5187SPTR", 0x5610, 0x11 },
+	{ "MSPM0G5187SRHBR", 0x5610, 0x13 },
+	{ "MSPM0G5187SRGER", 0x5610, 0x14 },
+	{ "MSPM0G5187SRGZR", 0x5610, 0x12 },
+	{ "MSPM0G5187SRUYR", 0x5610, 0x17 },
 };
 
 /* https://www.ti.com/lit/gpn/mspm0c1104 Table 8-12 and so on */
@@ -305,7 +412,9 @@ static const struct mspm0_part_info mspm0lx22x_parts[] = {
 static const struct mspm0_family_info mspm0_finf[] = {
 	{ "MSPM0L", 0xbb82, ARRAY_SIZE(mspm0l_parts), mspm0l_parts },
 	{ "MSPM0Lx22x", 0xbb9f, ARRAY_SIZE(mspm0lx22x_parts), mspm0lx22x_parts },
-	{ "MSPM0G", 0xbb88, ARRAY_SIZE(mspm0g_parts), mspm0g_parts },
+	{ "MSPM0G", 0xbb88, ARRAY_SIZE(mspm0g_parts_bb88), mspm0g_parts_bb88 },
+	{ "MSPM0G", 0xbba9, ARRAY_SIZE(mspm0g_parts_bba9), mspm0g_parts_bba9 },
+	{ "MSPM0G", 0xbbbc, ARRAY_SIZE(mspm0g_parts_bbbc), mspm0g_parts_bbbc },
 	{ "MSPM0C", 0xbba1, ARRAY_SIZE(mspm0c_parts), mspm0c_parts },
 };
 
@@ -379,30 +488,94 @@ static int mspm0_read_part_info(struct flash_bank *bank)
 	struct target *target = bank->target;
 	const struct mspm0_family_info *minfo = NULL;
 
+	/*
+	 * FLASH_ERR_01 workaround: on MSPM0G devices the flash controller
+	 * rejects any bus-master access to FACTORYREGION when MCLK is sourced
+	 * from HSCLK (SYSPLL/HFXT) and flash wait-state 2 is active
+	 * (required for MCLK > 32 MHz).  This applies to DAP AHB-AP reads too,
+	 * not just CPU accesses.  If both conditions are true, temporarily
+	 * switch MCLK back to SYSOSC (≤ 32 MHz on every MSPM0 variant) for the
+	 * FACTORYREGION reads and restore afterwards.  The SYSCTL_MCLKCFG write
+	 * does not take place on L/C parts: USEHSCLK is never set there because
+	 * those cores do not exceed 32 MHz.
+	 */
+	uint32_t saved_mclkcfg = 0;
+	bool mclk_switched = false;
+	uint32_t mclkcfg;
+	int retval = target_read_u32(target, SYSCTL_MCLKCFG, &mclkcfg);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Failed to read SYSCTL_MCLKCFG to check FLASH_ERR_01");
+		return retval;
+	}
+
+	if ((mclkcfg & SYSCTL_MCLKCFG_USEHSCLK) &&
+		((mclkcfg & SYSCTL_MCLKCFG_FLASHWAIT_MASK) == SYSCTL_MCLKCFG_FLASHWAIT_2)) {
+		saved_mclkcfg = mclkcfg;
+		retval = target_write_u32(target, SYSCTL_MCLKCFG,
+				mclkcfg & ~SYSCTL_MCLKCFG_USEHSCLK);
+		if (retval == ERROR_OK) {
+			mclk_switched = true;
+			/*
+			 * Read back MCLKCFG to flush the write, then add an
+			 * explicit delay to allow the MCLK source mux to fully
+			 * settle on SYSOSC before the flash controller timing is
+			 * used for FACTORYREGION accesses.
+			 */
+			uint32_t dummy;
+			retval = target_read_u32(target, SYSCTL_MCLKCFG, &dummy);
+			if (retval != ERROR_OK) {
+				LOG_ERROR("MSPM0: FLASH_ERR_01 workaround: "
+					"readback flush failed");
+				goto restore_mclk;
+			}
+			alive_sleep(1);
+			LOG_DEBUG("MSPM0: FLASH_ERR_01 workaround ACTIVE: "
+				"Lowering MCLK before FACTORYREGION read");
+		} else {
+			LOG_ERROR("MSPM0: FLASH_ERR_01 workaround: "
+				"could not lower MCLK before FACTORYREGION read");
+		}
+	}
+
 	/* Read and parse chip identification and flash version register */
 	uint32_t did;
-	int retval = target_read_u32(target, MSPM0_DID, &did);
+	retval = target_read_u32(target, MSPM0_DID, &did);
 	if (retval != ERROR_OK) {
 		LOG_ERROR("Failed to read device ID");
-		return retval;
+		goto restore_mclk;
 	}
 	retval = target_read_u32(target, MSPM0_TRACEID, &mspm0_info->traceid);
 	if (retval != ERROR_OK) {
 		LOG_ERROR("Failed to read trace ID");
-		return retval;
+		goto restore_mclk;
 	}
 	uint32_t userid;
 	retval = target_read_u32(target, MSPM0_USERID, &userid);
 	if (retval != ERROR_OK) {
 		LOG_ERROR("Failed to read user ID");
-		return retval;
+		goto restore_mclk;
 	}
 	uint32_t flashram;
 	retval = target_read_u32(target, MSPM0_SRAMFLASH, &flashram);
 	if (retval != ERROR_OK) {
 		LOG_ERROR("Failed to read sramflash register");
-		return retval;
+		goto restore_mclk;
 	}
+
+restore_mclk:
+	if (mclk_switched) {
+		int retval2 = target_write_u32(target, SYSCTL_MCLKCFG, saved_mclkcfg);
+		if (retval2 != ERROR_OK) {
+			LOG_ERROR("MSPM0: FLASH_ERR_01 workaround: "
+				"could not restore MCLK after FACTORYREGION read");
+			return retval2;
+		}
+		LOG_DEBUG("MSPM0: FLASH_ERR_01 workaround: "
+			"restored MCLK after FACTORYREGION read");
+	}
+	if (retval != ERROR_OK)
+		return retval;
+
 	uint32_t flashdesc;
 	retval = target_read_u32(target, FCTL_REG_DESC, &flashdesc);
 	if (retval != ERROR_OK) {
@@ -429,7 +602,7 @@ static int mspm0_read_part_info(struct flash_bank *bank)
 		LOG_WARNING("Unknown Device ID[0x%" PRIx32 "], cannot identify target",
 			did);
 		LOG_DEBUG("did 0x%" PRIx32 ", traceid 0x%" PRIx32 ", userid 0x%" PRIx32
-			", flashram 0x%" PRIx32 "", did, mspm0_info->traceid, userid,
+			", flashram 0x%" PRIx32, did, mspm0_info->traceid, userid,
 			flashram);
 		return ERROR_FLASH_OPERATION_FAILED;
 	}
@@ -737,10 +910,10 @@ static int mspm0_fctl_wait_cmd_ok(struct flash_bank *bank)
 			return retval;
 
 		elapsed_ms = timeval_ms() - start_ms;
-		if (elapsed_ms > 500)
-			keep_alive();
 		if (elapsed_ms > MSPM0_FLASH_TIMEOUT_MS)
 			break;
+
+		keep_alive();
 	}
 
 	if ((return_code & FCTL_STATCMD_CMDPASS_MASK) != FCTL_STATCMD_CMDPASS_STATPASS) {
@@ -1062,6 +1235,19 @@ static int mspm0_probe(struct flash_bank *bank)
 		mspm0_info->protect_reg_count = 1;
 		break;
 	case MSPM0_FLASH_BASE_MAIN:
+		if (!mspm0_info->main_flash_size_kb) {
+			/*
+			 * FACTORYREGION was unreadable when this bank was probed
+			 * (e.g. device not yet halted, MCLK still at HSCLK on
+			 * first examine).  Clear did so the next auto_probe call
+			 * re-runs mspm0_read_part_info with the target in a known
+			 * state.
+			 */
+			LOG_WARNING("MSPM0: main flash size is 0 — "
+				"FACTORYREGION data incomplete, scheduling re-probe");
+			mspm0_info->did = 0;
+			return ERROR_FLASH_BANK_NOT_PROBED;
+		}
 		bank->size = (mspm0_info->main_flash_size_kb * 1024);
 		bank->num_sectors = bank->size / mspm0_info->sector_size;
 		/*

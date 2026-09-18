@@ -139,6 +139,9 @@ static const struct {
 	{ ARMV7M_FAULTMASK, "faultmask", 1, REG_TYPE_INT8, "system", "org.gnu.gdb.arm.m-system", NULL, },
 	{ ARMV7M_CONTROL, "control", 3, REG_TYPE_INT8, "system", "org.gnu.gdb.arm.m-system", NULL, },
 
+	{ ARMV8M_MSPLIM, "msplim", 32, REG_TYPE_DATA_PTR, "stack", "org.gnu.gdb.arm.m-system", NULL, },
+	{ ARMV8M_PSPLIM, "psplim", 32, REG_TYPE_DATA_PTR, "stack", "org.gnu.gdb.arm.m-system", NULL, },
+
 	/* ARMv8-M security extension (TrustZone) specific registers */
 	{ ARMV8M_MSP_NS, "msp_ns", 32, REG_TYPE_DATA_PTR, "stack", "org.gnu.gdb.arm.secext", NULL, },
 	{ ARMV8M_PSP_NS, "psp_ns", 32, REG_TYPE_DATA_PTR, "stack", "org.gnu.gdb.arm.secext", NULL, },
@@ -240,7 +243,6 @@ const char *armv7m_exception_string(int number)
 
 static int armv7m_get_core_reg(struct reg *reg)
 {
-	int retval;
 	struct arm_reg *armv7m_reg = reg->arch_info;
 	struct target *target = armv7m_reg->target;
 	struct arm *arm = target_to_arm(target);
@@ -248,9 +250,7 @@ static int armv7m_get_core_reg(struct reg *reg)
 	if (target->state != TARGET_HALTED)
 		return ERROR_TARGET_NOT_HALTED;
 
-	retval = arm->read_core_reg(target, reg, reg->number, arm->core_mode);
-
-	return retval;
+	return arm->read_core_reg(target, reg, reg->number, arm->core_mode);
 }
 
 static int armv7m_set_core_reg(struct reg *reg, uint8_t *buf)
@@ -287,6 +287,12 @@ uint32_t armv7m_map_id_to_regsel(unsigned int arm_reg_id)
 
 	case ARMV8M_MSP_NS...ARMV8M_PSPLIM_NS:
 		return arm_reg_id - ARMV8M_MSP_NS + ARMV8M_REGSEL_MSP_NS;
+
+	case ARMV8M_PSPLIM:
+		return ARMV8M_REGSEL_PSPLIM;
+
+	case ARMV8M_MSPLIM:
+		return ARMV8M_REGSEL_MSPLIM;
 
 	case ARMV8M_PMSK_BPRI_FLTMSK_CTRL_S:
 		return ARMV8M_REGSEL_PMSK_BPRI_FLTMSK_CTRL_S;
@@ -642,9 +648,7 @@ int armv7m_start_algorithm(struct target *target,
 	/* save previous core mode */
 	armv7m_algorithm_info->core_mode = core_mode;
 
-	retval = target_resume(target, false, entry_point, true, true);
-
-	return retval;
+	return target_resume(target, false, entry_point, true, true);
 }
 
 /** Waits for an algorithm in the target. */
@@ -964,7 +968,8 @@ cleanup:
 
 /** Checks an array of memory regions whether they are erased. */
 int armv7m_blank_check_memory(struct target *target,
-	struct target_memory_check_block *blocks, int num_blocks, uint8_t erased_value)
+	struct target_memory_check_block *blocks, unsigned int num_blocks,
+	uint8_t erased_value, unsigned int *checked)
 {
 	struct working_area *erase_check_algorithm;
 	struct working_area *erase_check_params;
@@ -1000,7 +1005,13 @@ int armv7m_blank_check_memory(struct target *target,
 	};
 
 	uint32_t avail = target_get_working_area_avail(target);
-	int blocks_to_check = avail / sizeof(struct algo_block) - 1;
+	unsigned int avail_blocks = avail / sizeof(struct algo_block);
+	if (avail_blocks < 2) {
+		retval = ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+		goto cleanup1;
+	}
+
+	unsigned int blocks_to_check = avail_blocks - 1;
 	if (num_blocks < blocks_to_check)
 		blocks_to_check = num_blocks;
 
@@ -1010,7 +1021,7 @@ int armv7m_blank_check_memory(struct target *target,
 		goto cleanup1;
 	}
 
-	int i;
+	unsigned int i;
 	uint32_t total_size = 0;
 	for (i = 0; i < blocks_to_check; i++) {
 		total_size += blocks[i].size;
@@ -1080,7 +1091,7 @@ int armv7m_blank_check_memory(struct target *target,
 		LOG_TARGET_INFO(target, "Slow CPU clock: %d blocks checked, %d remain. Continuing...",
 			i, num_blocks - i);
 
-	retval = i;		/* return number of blocks really checked */
+	*checked = i;		/* return number of blocks really checked */
 
 cleanup4:
 	destroy_reg_param(&reg_params[0]);

@@ -381,9 +381,7 @@ static int ipdbg_shift_vir(struct ipdbg_hub *hub)
 	ipdbg_init_scan_field(hub->scratch_memory.fields, NULL,
 		hub->virtual_ir->length, hub->scratch_memory.vir_out_val);
 	jtag_add_dr_scan(tap, 1, hub->scratch_memory.fields, TAP_IDLE);
-	retval = jtag_execute_queue();
-
-	return retval;
+	return jtag_execute_queue();
 }
 
 static int ipdbg_shift_data(struct ipdbg_hub *hub, uint32_t dn_data, uint32_t *up_data)
@@ -885,23 +883,6 @@ COMMAND_HANDLER(handle_ipdbg_stop_command)
 	return ipdbg_stop(hub, tool);
 }
 
-static const struct command_registration ipdbg_hostserver_subcommand_handlers[] = {
-	{
-		.name = "start",
-		.mode = COMMAND_EXEC,
-		.handler = handle_ipdbg_start_command,
-		.help = "Starts a IPDBG Host server.",
-		.usage = "-tool number -port port"
-	}, {
-		.name = "stop",
-		.mode = COMMAND_EXEC,
-		.handler = handle_ipdbg_stop_command,
-		.help = "Stops a IPDBG Host server.",
-		.usage = "-tool number"
-	},
-	COMMAND_REGISTRATION_DONE
-};
-
 static COMMAND_HELPER(ipdbg_config_queuing, struct ipdbg_hub *hub, unsigned int size)
 {
 	if (!hub)
@@ -944,13 +925,18 @@ COMMAND_HANDLER(handle_ipdbg_cfg_queuing_command)
 
 static const struct command_registration ipdbg_hub_subcommand_handlers[] = {
 	{
-		.name = "ipdbg",
+		.name = "start",
 		.mode = COMMAND_EXEC,
-		.help = "IPDBG Hub commands.",
-		.usage = "",
-		.chain = ipdbg_hostserver_subcommand_handlers
-	},
-	{
+		.handler = handle_ipdbg_start_command,
+		.help = "Starts a IPDBG Host server.",
+		.usage = "-tool number -port port"
+	}, {
+		.name = "stop",
+		.mode = COMMAND_EXEC,
+		.handler = handle_ipdbg_stop_command,
+		.help = "Stops a IPDBG Host server.",
+		.usage = "-tool number"
+	}, {
 		.name = "queuing",
 		.handler = handle_ipdbg_cfg_queuing_command,
 		.mode = COMMAND_ANY,
@@ -1151,7 +1137,6 @@ static const struct command_registration ipdbg_command_handlers[] = {
 	},
 	COMMAND_REGISTRATION_DONE
 };
-
 int ipdbg_register_commands(struct command_context *cmd_ctx)
 {
 	return register_commands(cmd_ctx, NULL, ipdbg_command_handlers);

@@ -11,7 +11,6 @@
 
 #include "breakpoints.h"
 #include "aarch64.h"
-#include "a64_disassembler.h"
 #include "register.h"
 #include "target_request.h"
 #include "target_type.h"
@@ -39,7 +38,8 @@ struct aarch64_private_config {
 	struct arm_cti *cti;
 };
 
-static int aarch64_poll(struct target *target);
+static int aarch64_poll_smp(struct target *target, bool smp,
+							bool postpone_event);
 static int aarch64_debug_entry(struct target *target);
 static int aarch64_restore_context(struct target *target, bool bpwp);
 static int aarch64_set_breakpoint(struct target *target,
@@ -50,7 +50,7 @@ static int aarch64_set_hybrid_breakpoint(struct target *target,
 	struct breakpoint *breakpoint);
 static int aarch64_unset_breakpoint(struct target *target,
 	struct breakpoint *breakpoint);
-static int aarch64_mmu(struct target *target, int *enabled);
+static int aarch64_mmu(struct target *target, bool *enabled);
 static int aarch64_virt2phys(struct target *target,
 	target_addr_t virt, target_addr_t *phys);
 static int aarch64_read_cpu_memory(struct target *target,
@@ -215,8 +215,27 @@ static int aarch64_init_debug_access(struct target *target)
 	struct armv8_common *armv8 = target_to_armv8(target);
 	int retval;
 	uint32_t dummy;
+	uint32_t lsr;
 
 	LOG_DEBUG("%s", target_name(target));
+
+	/* while the LAR shouldn't even be visible on the external debugger
+	 * interface, this unlock is needed on at least NXP's LX2160A
+	 */
+	retval = mem_ap_write_atomic_u32(armv8->debug_ap,
+			armv8->debug_base + ARM_CS_LAR, ARM_CS_LAR_UNLOCK_KEY);
+	if (retval != ERROR_OK) {
+		LOG_WARNING("debug unit unlock write failed - register may not be implemented");
+	} else {
+		retval = mem_ap_read_atomic_u32(armv8->debug_ap,
+				armv8->debug_base + ARM_CS_LSR, &lsr);
+		if (retval != ERROR_OK)
+			LOG_WARNING("debug unit unlock write OK but status read failed.");
+		else if ((lsr & (ARM_CS_LSR_SLI | ARM_CS_LSR_SLK))
+			 == (ARM_CS_LSR_SLI | ARM_CS_LSR_SLK))
+			/* try to continue anyway, at least read accesses still work */
+			LOG_WARNING("debug unit locked, may cause further failures.");
+	}
 
 	retval = mem_ap_write_atomic_u32(armv8->debug_ap,
 			armv8->debug_base + CPUV8_DBG_OSLAR, 0);
@@ -262,12 +281,9 @@ static int aarch64_dap_write_memap_register_u32(struct target *target,
 	target_addr_t address,
 	uint32_t value)
 {
-	int retval;
 	struct armv8_common *armv8 = target_to_armv8(target);
 
-	retval = mem_ap_write_atomic_u32(armv8->debug_ap, address, value);
-
-	return retval;
+	return mem_ap_write_atomic_u32(armv8->debug_ap, address, value);
 }
 
 static int aarch64_dpm_setup(struct aarch64_common *a8, uint64_t debug)
@@ -469,9 +485,8 @@ static int aarch64_halt_smp(struct target *target, bool exc_target)
 	return retval;
 }
 
-static int update_halt_gdb(struct target *target, enum target_debug_reason debug_reason)
+static int aarch64_update_halt_gdb(struct target *target, enum target_debug_reason debug_reason)
 {
-	struct target *gdb_target = NULL;
 	struct target_list *head;
 	struct target *curr;
 
@@ -480,7 +495,7 @@ static int update_halt_gdb(struct target *target, enum target_debug_reason debug
 		aarch64_halt_smp(target, true);
 	}
 
-	/* poll all targets in the group, but skip the target that serves GDB */
+	/* poll all targets in the group */
 	foreach_smp_target(head, target->smp_targets) {
 		curr = head->target;
 		/* skip calling context */
@@ -491,31 +506,43 @@ static int update_halt_gdb(struct target *target, enum target_debug_reason debug
 		/* skip targets that were already halted */
 		if (curr->state == TARGET_HALTED)
 			continue;
-		/* remember the gdb_service->target */
-		if (curr->gdb_service)
-			gdb_target = curr->gdb_service->target;
-		/* skip it */
-		if (curr == gdb_target)
-			continue;
 
-		/* avoid recursion in aarch64_poll() */
-		curr->smp = 0;
-		aarch64_poll(curr);
-		curr->smp = 1;
+		const bool smp = false;
+		const bool postpone_event = true;
+		aarch64_poll_smp(curr, smp, postpone_event);
 	}
 
-	/* after all targets were updated, poll the gdb serving target */
-	if (gdb_target && gdb_target != target)
-		aarch64_poll(gdb_target);
-
 	return ERROR_OK;
+}
+
+enum postponed_halt_events_op {
+	POSTPONED_HALT_EVENT_CLEAR,
+	POSTPONED_HALT_EVENT_EMIT
+};
+
+static void aarch64_smp_postponed_halt_events(struct list_head *smp_targets,
+											enum postponed_halt_events_op op)
+{
+	struct target_list *head;
+	foreach_smp_target(head, smp_targets) {
+		struct target *t = head->target;
+		if (!t->smp_halt_event_postponed)
+			continue;
+
+		if (op == POSTPONED_HALT_EVENT_EMIT) {
+			LOG_TARGET_DEBUG(t, "sending postponed target event 'halted'");
+			target_call_event_callbacks(t, TARGET_EVENT_HALTED);
+		}
+		t->smp_halt_event_postponed = false;
+	}
 }
 
 /*
  * Aarch64 Run control
  */
 
-static int aarch64_poll(struct target *target)
+static int aarch64_poll_smp(struct target *target, bool smp,
+							bool postpone_event)
 {
 	struct armv8_common *armv8 = target_to_armv8(target);
 	enum target_state prev_target_state;
@@ -550,17 +577,25 @@ static int aarch64_poll(struct target *target)
 			if (retval != ERROR_OK)
 				return retval;
 
-			if (target->smp)
-				update_halt_gdb(target, debug_reason);
+			if (smp)
+				aarch64_update_halt_gdb(target, debug_reason);
 
-			if (arm_semihosting(target, &retval) != 0)
+			if (arm_semihosting(target, &retval) != 0) {
+				if (smp)
+					aarch64_smp_postponed_halt_events(target->smp_targets,
+													POSTPONED_HALT_EVENT_CLEAR);
+
 				return retval;
+			}
 
 			switch (prev_target_state) {
 			case TARGET_RUNNING:
 			case TARGET_UNKNOWN:
 			case TARGET_RESET:
-				target_call_event_callbacks(target, TARGET_EVENT_HALTED);
+				if (postpone_event)
+					target->smp_halt_event_postponed = true;
+				else
+					target_call_event_callbacks(target, TARGET_EVENT_HALTED);
 				break;
 			case TARGET_DEBUG_RUNNING:
 				target_call_event_callbacks(target, TARGET_EVENT_DEBUG_HALTED);
@@ -568,6 +603,10 @@ static int aarch64_poll(struct target *target)
 			default:
 				break;
 			}
+
+			if (smp)
+				aarch64_smp_postponed_halt_events(target->smp_targets,
+												POSTPONED_HALT_EVENT_EMIT);
 		}
 	} else if (prsr & PRSR_RESET) {
 		target->state = TARGET_RESET;
@@ -576,6 +615,12 @@ static int aarch64_poll(struct target *target)
 	}
 
 	return retval;
+}
+
+static int aarch64_poll(struct target *target)
+{
+	const bool postpone_event = false;
+	return aarch64_poll_smp(target, target->smp != 0, postpone_event);
 }
 
 static int aarch64_halt(struct target *target)
@@ -613,22 +658,22 @@ static int aarch64_restore_one(struct target *target, bool current,
 	 * kill the return address
 	 */
 	switch (arm->core_state) {
-		case ARM_STATE_ARM:
-			resume_pc &= 0xFFFFFFFC;
-			break;
-		case ARM_STATE_AARCH64:
-			resume_pc &= 0xFFFFFFFFFFFFFFFCULL;
-			break;
-		case ARM_STATE_THUMB:
-		case ARM_STATE_THUMB_EE:
-			/* When the return address is loaded into PC
-			 * bit 0 must be 1 to stay in Thumb state
-			 */
-			resume_pc |= 0x1;
-			break;
-		case ARM_STATE_JAZELLE:
-			LOG_ERROR("How do I resume into Jazelle state??");
-			return ERROR_FAIL;
+	case ARM_STATE_ARM:
+		resume_pc &= 0xFFFFFFFC;
+		break;
+	case ARM_STATE_AARCH64:
+		resume_pc &= 0xFFFFFFFFFFFFFFFCULL;
+		break;
+	case ARM_STATE_THUMB:
+	case ARM_STATE_THUMB_EE:
+		/* When the return address is loaded into PC
+		 * bit 0 must be 1 to stay in Thumb state
+		 */
+		resume_pc |= 0x1;
+		break;
+	case ARM_STATE_JAZELLE:
+		LOG_ERROR("How do I resume into Jazelle state??");
+		return ERROR_FAIL;
 	}
 	LOG_DEBUG("resume pc = 0x%016" PRIx64, resume_pc);
 	buf_set_u64(arm->pc->value, 0, 64, resume_pc);
@@ -861,7 +906,7 @@ static int aarch64_step_restart_smp(struct target *target)
 		retval = aarch64_do_restart_one(curr, RESTART_LAZY);
 		if (retval != ERROR_OK)
 			break;
-}
+	}
 
 	return retval;
 }
@@ -925,6 +970,8 @@ static int aarch64_resume(struct target *target, bool current,
 				}
 
 				if (curr->state != TARGET_RUNNING) {
+					struct armv8_common *curr_armv8 = target_to_armv8(curr);
+					curr_armv8->last_run_control_op = ARMV8_RUNCONTROL_RESUME;
 					curr->state = TARGET_RUNNING;
 					curr->debug_reason = DBG_REASON_NOTHALTED;
 					target_call_event_callbacks(curr, TARGET_EVENT_RESUMED);
@@ -1095,20 +1142,19 @@ static int aarch64_post_debug_entry(struct target *target)
 	LOG_DEBUG("System_register: %8.8" PRIx64, aarch64->system_control_reg);
 	aarch64->system_control_reg_curr = aarch64->system_control_reg;
 
-	if (armv8->armv8_mmu.armv8_cache.info == -1) {
+	if (!armv8->armv8_mmu.armv8_cache.info_valid) {
 		armv8_identify_cache(armv8);
 		armv8_read_mpidr(armv8);
 	}
 	if (armv8->is_armv8r) {
-		armv8->armv8_mmu.mmu_enabled = 0;
+		armv8->armv8_mmu.mmu_enabled = false;
 	} else {
-		armv8->armv8_mmu.mmu_enabled =
-			(aarch64->system_control_reg & 0x1U) ? 1 : 0;
+		armv8->armv8_mmu.mmu_enabled = aarch64->system_control_reg & 0x1U;
 	}
 	armv8->armv8_mmu.armv8_cache.d_u_cache_enabled =
-		(aarch64->system_control_reg & 0x4U) ? 1 : 0;
+		aarch64->system_control_reg & 0x4U;
 	armv8->armv8_mmu.armv8_cache.i_cache_enabled =
-		(aarch64->system_control_reg & 0x1000U) ? 1 : 0;
+		aarch64->system_control_reg & 0x1000U;
 	return ERROR_OK;
 }
 
@@ -2529,7 +2575,7 @@ static int aarch64_read_phys_memory(struct target *target,
 static int aarch64_read_memory(struct target *target, target_addr_t address,
 	uint32_t size, uint32_t count, uint8_t *buffer)
 {
-	int mmu_enabled = 0;
+	bool mmu_enabled = false;
 	int retval;
 
 	/* determine if MMU was enabled on target stop */
@@ -2566,7 +2612,7 @@ static int aarch64_write_phys_memory(struct target *target,
 static int aarch64_write_memory(struct target *target, target_addr_t address,
 	uint32_t size, uint32_t count, const uint8_t *buffer)
 {
-	int mmu_enabled = 0;
+	bool mmu_enabled = false;
 	int retval;
 
 	/* determine if MMU was enabled on target stop */
@@ -2683,16 +2729,18 @@ static int aarch64_examine_first(struct target *target)
 
 	retval = mem_ap_read_u32(armv8->debug_ap,
 			armv8->debug_base + CPUV8_DBG_MEMFEATURE0, &tmp0);
-	retval += mem_ap_read_u32(armv8->debug_ap,
-			armv8->debug_base + CPUV8_DBG_MEMFEATURE0 + 4, &tmp1);
+	if (retval == ERROR_OK)
+		retval = mem_ap_read_u32(armv8->debug_ap,
+						armv8->debug_base + CPUV8_DBG_MEMFEATURE0 + 4, &tmp1);
 	if (retval != ERROR_OK) {
 		LOG_DEBUG("Examine %s failed", "Memory Model Type");
 		return retval;
 	}
 	retval = mem_ap_read_u32(armv8->debug_ap,
 			armv8->debug_base + CPUV8_DBG_DBGFEATURE0, &tmp2);
-	retval += mem_ap_read_u32(armv8->debug_ap,
-			armv8->debug_base + CPUV8_DBG_DBGFEATURE0 + 4, &tmp3);
+	if (retval == ERROR_OK)
+		retval = mem_ap_read_u32(armv8->debug_ap,
+						armv8->debug_base + CPUV8_DBG_DBGFEATURE0 + 4, &tmp3);
 	if (retval != ERROR_OK) {
 		LOG_DEBUG("Examine %s failed", "ID_AA64DFR0_EL1");
 		return retval;
@@ -2877,7 +2925,7 @@ static void aarch64_deinit_target(struct target *target)
 	free(aarch64);
 }
 
-static int aarch64_mmu(struct target *target, int *enabled)
+static int aarch64_mmu(struct target *target, bool *enabled)
 {
 	struct aarch64_common *aarch64 = target_to_aarch64(target);
 	struct armv8_common *armv8 = &aarch64->armv8_common;
@@ -2886,7 +2934,7 @@ static int aarch64_mmu(struct target *target, int *enabled)
 		return ERROR_TARGET_NOT_HALTED;
 	}
 	if (armv8->is_armv8r)
-		*enabled = 0;
+		*enabled = false;
 	else
 		*enabled = target_to_aarch64(target)->armv8_common.armv8_mmu.mmu_enabled;
 	return ERROR_OK;
@@ -2896,6 +2944,45 @@ static int aarch64_virt2phys(struct target *target, target_addr_t virt,
 			     target_addr_t *phys)
 {
 	return armv8_mmu_translate_va_pa(target, virt, phys, 1);
+}
+
+static int aarch64_insn_set(struct command_invocation *cmd,
+	struct target *target, const char **insn_set)
+{
+	if (target->state != TARGET_HALTED) {
+		command_print(cmd, "[%s] not halted", target_name(target));
+		return ERROR_TARGET_NOT_HALTED;
+	}
+
+	struct arm *arm = target_to_arm(target);
+
+	switch (arm->core_state) {
+	case ARM_STATE_AARCH64:
+		if (target->endianness == TARGET_BIG_ENDIAN)
+			*insn_set = "arm64be";
+		else
+			*insn_set = "arm64";
+		break;
+
+	case ARM_STATE_ARM:
+		if (target->endianness == TARGET_BIG_ENDIAN)
+			*insn_set = "armbe";
+		else
+			*insn_set = "arm";
+		break;
+
+	case ARM_STATE_THUMB:
+	case ARM_STATE_THUMB_EE:
+		*insn_set = "thumb";
+		break;
+
+	default:
+		command_print(cmd, "[%s] unknown core_state %d", target_name(target),
+					  arm->core_state);
+		return ERROR_FAIL;
+	}
+
+	return ERROR_OK;
 }
 
 /*
@@ -3005,39 +3092,6 @@ COMMAND_HANDLER(aarch64_handle_dbginit_command)
 	}
 
 	return aarch64_init_debug_access(target);
-}
-
-COMMAND_HANDLER(aarch64_handle_disassemble_command)
-{
-	struct target *target = get_current_target(CMD_CTX);
-
-	if (!target) {
-		LOG_ERROR("No target selected");
-		return ERROR_FAIL;
-	}
-
-	struct aarch64_common *aarch64 = target_to_aarch64(target);
-
-	if (aarch64->common_magic != AARCH64_COMMON_MAGIC) {
-		command_print(CMD, "current target isn't an AArch64");
-		return ERROR_FAIL;
-	}
-
-	int count = 1;
-	target_addr_t address;
-
-	switch (CMD_ARGC) {
-		case 2:
-			COMMAND_PARSE_NUMBER(int, CMD_ARGV[1], count);
-		/* FALL THROUGH */
-		case 1:
-			COMMAND_PARSE_ADDRESS(CMD_ARGV[0], address);
-			break;
-		default:
-			return ERROR_COMMAND_SYNTAX_ERROR;
-	}
-
-	return a64_disassemble(CMD, target, address, count);
 }
 
 COMMAND_HANDLER(aarch64_mask_interrupts_command)
@@ -3187,13 +3241,6 @@ static const struct command_registration aarch64_exec_command_handlers[] = {
 		.usage = "",
 	},
 	{
-		.name = "disassemble",
-		.handler = aarch64_handle_disassemble_command,
-		.mode = COMMAND_EXEC,
-		.help = "Disassemble instructions",
-		.usage = "address [count]",
-	},
-	{
 		.name = "maskisr",
 		.handler = aarch64_mask_interrupts_command,
 		.mode = COMMAND_ANY,
@@ -3282,6 +3329,8 @@ struct target_type aarch64_target = {
 	.write_phys_memory = aarch64_write_phys_memory,
 	.mmu = aarch64_mmu,
 	.virt2phys = aarch64_virt2phys,
+
+	.insn_set = aarch64_insn_set,
 };
 
 struct target_type armv8r_target = {
@@ -3318,4 +3367,6 @@ struct target_type armv8r_target = {
 	.init_target = aarch64_init_target,
 	.deinit_target = aarch64_deinit_target,
 	.examine = aarch64_examine,
+
+	.insn_set = aarch64_insn_set,
 };

@@ -14,6 +14,7 @@
 
 #include "arm720t.h"
 #include <helper/time_support.h>
+#include <helper/string_choices.h>
 #include "target_type.h"
 #include "register.h"
 #include "arm_opcodes.h"
@@ -156,8 +157,7 @@ static int arm720t_disable_mmu_caches(struct target *target,
 	if (d_u_cache || i_cache)
 		cp15_control &= ~0x4U;
 
-	retval = arm720t_write_cp15(target, 0xee010f10, cp15_control);
-	return retval;
+	return arm720t_write_cp15(target, 0xee010f10, cp15_control);
 }
 
 static int arm720t_enable_mmu_caches(struct target *target,
@@ -180,8 +180,7 @@ static int arm720t_enable_mmu_caches(struct target *target,
 	if (d_u_cache || i_cache)
 		cp15_control |= 0x4U;
 
-	retval = arm720t_write_cp15(target, 0xee010f10, cp15_control);
-	return retval;
+	return arm720t_write_cp15(target, 0xee010f10, cp15_control);
 }
 
 static int arm720t_post_debug_entry(struct target *target)
@@ -196,11 +195,12 @@ static int arm720t_post_debug_entry(struct target *target)
 	retval = jtag_execute_queue();
 	if (retval != ERROR_OK)
 		return retval;
-	LOG_DEBUG("cp15_control_reg: %8.8" PRIx32 "", arm720t->cp15_control_reg);
+	LOG_DEBUG("cp15_control_reg: %8.8" PRIx32, arm720t->cp15_control_reg);
 
-	arm720t->armv4_5_mmu.mmu_enabled = (arm720t->cp15_control_reg & 0x1U) ? 1 : 0;
-	arm720t->armv4_5_mmu.armv4_5_cache.d_u_cache_enabled = (arm720t->cp15_control_reg & 0x4U) ? 1 : 0;
-	arm720t->armv4_5_mmu.armv4_5_cache.i_cache_enabled = 0;
+	arm720t->armv4_5_mmu.mmu_enabled = arm720t->cp15_control_reg & 0x1U;
+	arm720t->armv4_5_mmu.armv4_5_cache.d_u_cache_enabled =
+		arm720t->cp15_control_reg & 0x4U;
+	arm720t->armv4_5_mmu.armv4_5_cache.i_cache_enabled = false;
 
 	/* save i/d fault status and address register */
 	retval = arm720t_read_cp15(target, 0xee150f10, &arm720t->fsr_reg);
@@ -209,8 +209,7 @@ static int arm720t_post_debug_entry(struct target *target)
 	retval = arm720t_read_cp15(target, 0xee160f10, &arm720t->far_reg);
 	if (retval != ERROR_OK)
 		return retval;
-	retval = jtag_execute_queue();
-	return retval;
+	return jtag_execute_queue();
 }
 
 static void arm720t_pre_restore_context(struct target *target)
@@ -226,19 +225,15 @@ static int arm720t_arch_state(struct target *target)
 {
 	struct arm720t_common *arm720t = target_to_arm720(target);
 
-	static const char *state[] = {
-		"disabled", "enabled"
-	};
-
 	arm_arch_state(target);
 	LOG_USER("MMU: %s, Cache: %s",
-			 state[arm720t->armv4_5_mmu.mmu_enabled],
-			 state[arm720t->armv4_5_mmu.armv4_5_cache.d_u_cache_enabled]);
+			 str_enabled_disabled(arm720t->armv4_5_mmu.mmu_enabled),
+			 str_enabled_disabled(arm720t->armv4_5_mmu.armv4_5_cache.d_u_cache_enabled));
 
 	return ERROR_OK;
 }
 
-static int arm720_mmu(struct target *target, int *enabled)
+static int arm720_mmu(struct target *target, bool *enabled)
 {
 	if (target->state != TARGET_HALTED) {
 		LOG_TARGET_ERROR(target, "not halted");
@@ -325,7 +320,7 @@ static int arm720t_soft_reset_halt(struct target *target)
 				return retval;
 		} else
 			break;
-		if (debug_level >= 3)
+		if (LOG_LEVEL_IS(LOG_LVL_DEBUG))
 			alive_sleep(100);
 		else
 			keep_alive();
@@ -354,9 +349,9 @@ static int arm720t_soft_reset_halt(struct target *target)
 	retval = arm720t_disable_mmu_caches(target, 1, 1, 1);
 	if (retval != ERROR_OK)
 		return retval;
-	arm720t->armv4_5_mmu.mmu_enabled = 0;
-	arm720t->armv4_5_mmu.armv4_5_cache.d_u_cache_enabled = 0;
-	arm720t->armv4_5_mmu.armv4_5_cache.i_cache_enabled = 0;
+	arm720t->armv4_5_mmu.mmu_enabled = false;
+	arm720t->armv4_5_mmu.armv4_5_cache.d_u_cache_enabled = false;
+	arm720t->armv4_5_mmu.armv4_5_cache.i_cache_enabled = false;
 
 	retval = target_call_event_callbacks(target, TARGET_EVENT_HALTED);
 	if (retval != ERROR_OK)
@@ -407,7 +402,7 @@ static int arm720t_init_arch_info(struct target *target,
 	arm720t->armv4_5_mmu.disable_mmu_caches = arm720t_disable_mmu_caches;
 	arm720t->armv4_5_mmu.enable_mmu_caches = arm720t_enable_mmu_caches;
 	arm720t->armv4_5_mmu.has_tiny_pages = 0;
-	arm720t->armv4_5_mmu.mmu_enabled = 0;
+	arm720t->armv4_5_mmu.mmu_enabled = false;
 
 	return ERROR_OK;
 }
@@ -501,4 +496,6 @@ struct target_type arm720t_target = {
 	.deinit_target = arm720t_deinit_target,
 	.examine = arm7_9_examine,
 	.check_reset = arm7_9_check_reset,
+
+	.insn_set = armv4_5_insn_set,
 };

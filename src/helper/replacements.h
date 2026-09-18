@@ -51,21 +51,6 @@ struct timeval {
 
 #endif
 
-/* gettimeofday() */
-#ifndef HAVE_GETTIMEOFDAY
-
-#ifdef _WIN32
-struct timezone {
-	int tz_minuteswest;
-	int tz_dsttime;
-};
-#endif
-struct timezone;
-
-int gettimeofday(struct timeval *tv, struct timezone *tz);
-
-#endif
-
 void *clear_malloc(size_t size);
 void *fill_malloc(size_t size);
 
@@ -141,6 +126,7 @@ struct sockaddr_un {
 #endif
 
 #if IS_MINGW == 1
+#if defined(__x86_64__) || defined(__i386__)
 static inline unsigned char inb(unsigned short int port)
 {
 	unsigned char _v;
@@ -152,6 +138,7 @@ static inline void outb(unsigned char value, unsigned short int port)
 {
 	__asm__ __volatile__ ("outb %b0,%w1" : : "a" (value), "Nd" (port));
 }
+#endif
 
 /* mingw does not have ffs, so use gcc builtin types */
 #define ffs __builtin_ffs
@@ -161,6 +148,18 @@ static inline void outb(unsigned char value, unsigned short int port)
 int win_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struct timeval *tv);
 
 #endif	/* _WIN32 */
+
+/* Socket descriptor is unsigned on Windows.
+ * Add a cast to prevent sign mismatch warnings (-Wsign-compare). */
+#ifdef _WIN32
+#define OCD_FD_SET(fd, set) FD_SET((SOCKET)(fd), (set))
+#define OCD_FD_CLR(fd, set) FD_CLR((SOCKET)(fd), (set))
+#define OCD_FD_ISSET(fd, set) FD_ISSET((SOCKET)(fd), (set))
+#else
+#define OCD_FD_SET(fd, set) FD_SET((fd), (set))
+#define OCD_FD_CLR(fd, set) FD_CLR((fd), (set))
+#define OCD_FD_ISSET(fd, set) FD_ISSET((fd), (set))
+#endif
 
 /* generic socket functions for Windows and Posix */
 static inline int write_socket(int handle, const void *buffer, unsigned int count)
@@ -222,6 +221,20 @@ static inline int socket_select(int max_fd,
 	return win_select(max_fd, rfds, wfds, efds, tv);
 #else
 	return select(max_fd, rfds, wfds, efds, tv);
+#endif
+}
+
+static inline int socket_recv_timeout(int fd, unsigned long timeout_msec)
+{
+#ifdef _WIN32
+	DWORD timeout = timeout_msec;
+	return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
+			sizeof(timeout));
+#else
+	struct timeval tv;
+	tv.tv_sec = timeout_msec / 1000;
+	tv.tv_usec = (timeout_msec % 1000) * 1000;
+	return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
 #endif
 }
 

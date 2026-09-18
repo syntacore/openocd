@@ -69,6 +69,9 @@
 #define FLASH_U5_DUALBANK		BIT(21)
 #define FLASH_TZEN				BIT(31)
 
+/* FLASH_WRPxyR register bits */
+#define FLASH_WRPXYR_UNLOCK		BIT(31)
+
 /* FLASH secure block based bank 1/2 register offsets */
 #define FLASH_SECBB1(X) (0x80 + 4 * (X - 1))
 #define FLASH_SECBB2(X) (0xA0 + 4 * (X - 1))
@@ -86,11 +89,13 @@
 
 /* Supported device IDs */
 #define DEVID_STM32L47_L48XX	0x415
+#define DEVID_STM32U3B_U3CXX	0x42A
 #define DEVID_STM32L43_L44XX	0x435
 #define DEVID_STM32C01XX		0x443
 #define DEVID_STM32C05XX        0x44C
 #define DEVID_STM32C09XX        0x44D
 #define DEVID_STM32C03XX		0x453
+#define DEVID_STM32U37_U38XX	0x454
 #define DEVID_STM32U53_U54XX	0x455
 #define DEVID_STM32G05_G06XX	0x456
 #define DEVID_STM32U031XX		0x459
@@ -116,6 +121,8 @@
 #define DEVID_STM32WB5XX		0x495
 #define DEVID_STM32WB3XX		0x496
 #define DEVID_STM32WLE_WL5XX	0x497
+#define DEVID_STM32WBA6X        0x4B0
+#define DEVID_STM32WBA2X        0x4B2
 
 /* known Flash base addresses */
 #define STM32_FLASH_BANK_BASE	0x08000000

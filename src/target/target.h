@@ -126,12 +126,19 @@ struct target {
 	bool defer_examine;
 
 	/**
-	 * Indicates whether this target has been examined.
+	 * Indicates whether this target has been examined,
+	 * remembers the last result of examine call.
 	 *
 	 * Do @b not access this field directly, use target_was_examined()
 	 * or target_set_examined().
 	 */
 	bool examined;
+	/**
+	 * The flag is set after a successful examine call.
+	 * It remains set forever or in the case of defer examine
+	 * gets reset by reset command.
+	 */
+	bool active_polled;
 
 	/**
 	 * true if the  target is currently running a downloaded
@@ -431,16 +438,28 @@ const char *target_type_name(const struct target *target);
  */
 int target_examine_one(struct target *target);
 
-/** @returns @c true if target_set_examined() has been called. */
+/** @returns @c true if target_set_examined() has been called.
+ *  The returned value reflects the last examination result. */
 static inline bool target_was_examined(const struct target *target)
 {
 	return target->examined;
 }
 
-/** Sets the @c examined flag for the given target. */
-/** Use in target->type->examine() after one-time setup is done. */
+/** @returns @c true if target_set_examined() has been called.
+ *  The flag remains set forever or in the case of defer examine
+ *  gets reset by reset command */
+static inline bool target_active_polled(const struct target *target)
+{
+	return target->active_polled;
+}
+
+/** Sets the @c examined and @c active_polled flags for the given target.
+ *  Not necessary to call it in target->type->examine() methods,
+ *  the target infrastructure calls it after successful return
+ *  from this method. */
 static inline void target_set_examined(struct target *target)
 {
+	target->active_polled = true;
 	target->examined = true;
 }
 
@@ -603,6 +622,15 @@ int target_run_read_async_algorithm(struct target *target,
 		void *arch_info);
 
 /**
+ * Returns true if target memory is ready to read/write.
+ *
+ * This routine is a wrapper for target->type->memory_ready.
+ * If the target specific check is not implemented,
+ * returns target_was_examined()
+ */
+bool target_memory_ready(struct target *target);
+
+/**
  * Read @a count items of @a size bytes from the memory of @a target at
  * the @a address given.
  *
@@ -665,8 +693,8 @@ int target_read_buffer(struct target *target,
 int target_checksum_memory(struct target *target,
 		target_addr_t address, uint32_t size, uint32_t *crc);
 int target_blank_check_memory(struct target *target,
-		struct target_memory_check_block *blocks, int num_blocks,
-		uint8_t erased_value);
+		struct target_memory_check_block *blocks, unsigned int num_blocks,
+		uint8_t erased_value, unsigned int *checked);
 int target_wait_state(struct target *target, enum target_state state, unsigned int ms);
 
 /**
@@ -786,7 +814,7 @@ int target_arch_state(struct target *target);
 void target_handle_event(struct target *t, enum target_event e);
 
 void target_handle_md_output(struct command_invocation *cmd,
-	struct target *target, target_addr_t address, unsigned size,
+	struct target *target, target_addr_t address, unsigned int size,
 	unsigned int count, const uint8_t *buffer, bool include_address);
 
 int target_profiling_default(struct target *target, uint32_t *samples, uint32_t
@@ -803,15 +831,15 @@ int target_profiling_default(struct target *target, uint32_t *samples, uint32_t
 #define ERROR_TARGET_TRANSLATION_FAULT	(-309)
 #define ERROR_TARGET_NOT_RUNNING (-310)
 #define ERROR_TARGET_NOT_EXAMINED (-311)
-#define ERROR_TARGET_DUPLICATE_BREAKPOINT (-312)
-#define ERROR_TARGET_ALGO_EXIT  (-313)
-#define ERROR_TARGET_SIZE_NOT_SUPPORTED  (-314)
-#define ERROR_TARGET_PACKING_NOT_SUPPORTED  (-315)
-#define ERROR_TARGET_HALTED_DO_RESUME  (-316)	/* used to workaround incorrect debug halt */
+#define ERROR_TARGET_ALGO_EXIT  (-312)
+#define ERROR_TARGET_SIZE_NOT_SUPPORTED  (-313)
+#define ERROR_TARGET_PACKING_NOT_SUPPORTED  (-314)
+#define ERROR_TARGET_HALTED_DO_RESUME  (-315)	/* used to workaround incorrect debug halt */
 
 extern bool get_target_reset_nag(void);
 
-#define TARGET_DEFAULT_POLLING_INTERVAL		100
+#define TARGET_DEFAULT_POLLING_INTERVAL 100u
+#define TARGET_MAX_POLLING_INTERVAL_MS 5000u
 
 const char *target_debug_reason_str(enum target_debug_reason reason);
 

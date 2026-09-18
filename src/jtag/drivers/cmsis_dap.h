@@ -52,7 +52,6 @@ struct cmsis_dap {
 	unsigned int pending_fifo_block_count;
 
 	uint16_t caps;
-	bool quirk_mode;	/* enable expensive workarounds */
 
 	uint32_t swo_buf_sz;
 	bool trace_enabled;
@@ -66,7 +65,7 @@ enum cmsis_dap_blocking {
 
 struct cmsis_dap_backend {
 	const char *name;
-	int (*open)(struct cmsis_dap *dap, uint16_t vids[], uint16_t pids[], const char *serial);
+	int (*open)(struct cmsis_dap *dap, const uint16_t vids[], const uint16_t pids[], const char *serial);
 	void (*close)(struct cmsis_dap *dap);
 	int (*read)(struct cmsis_dap *dap, int transfer_timeout_ms,
 				enum cmsis_dap_blocking blocking);
@@ -78,7 +77,9 @@ struct cmsis_dap_backend {
 
 extern const struct cmsis_dap_backend cmsis_dap_hid_backend;
 extern const struct cmsis_dap_backend cmsis_dap_usb_backend;
+extern const struct cmsis_dap_backend cmsis_dap_tcp_backend;
 extern const struct command_registration cmsis_dap_usb_subcommand_handlers[];
+extern const struct command_registration cmsis_dap_tcp_subcommand_handlers[];
 
 #define REPORT_ID_SIZE   1
 
