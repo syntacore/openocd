@@ -36,10 +36,14 @@ namespace eval __SC_JTAGLIB_INTERNAL {
     variable DMI_FAILED 2
     variable DMI_BUSY 3
 
-    # DMI address of the system bus control and status register.
+    # DMI addresses of the SBA registers.
     variable DM_SBCS       0x38
+    variable DM_SBADDRESS0 0x39
+    variable DM_SBADDRESS1 0x3a
+    variable DM_SBDATA0    0x3c
+    variable DM_SBDATA1    0x3d
 
-    # SBCS field positions and unshifted masks.
+    # SBCS field positions and unshifted masks, plus writable control bits.
     variable SBCS_SBVERSION_SHIFT 29
     variable SBCS_SBVERSION_VALUE_MASK 0x7
     variable SBCS_SBACCESS_SHIFT 17
@@ -48,6 +52,11 @@ namespace eval __SC_JTAGLIB_INTERNAL {
     variable SBCS_SBERROR_VALUE_MASK 0x7
     variable SBCS_SBASIZE_SHIFT 5
     variable SBCS_SBASIZE_VALUE_MASK 0x7f
+    variable SBCS_SBREADONADDR 0x100000
+    # Write-one-to-clear bits: sbbusyerror and every sberror bit.
+    variable SBCS_ERROR_CLEAR 0x407000
+    # Unsigned SBA addresses/values are assembled as two 32-bit words.
+    variable SBA_WORD_MASK 0xffffffff
 
     proc sc_jtaglib_get_tap_info { tap_num } {
         set taps_info [ocdjtag_riscv_get_taps_info]
@@ -143,6 +152,198 @@ namespace eval __SC_JTAGLIB_INTERNAL {
             set current_time [clock milliseconds]
         }
         return $res
+    }
+
+    # Parse unsigned 64-bit inputs digit by digit as two 32-bit words.
+    # Converting the whole input first can turn both UINT64_MAX and overflowing
+    # values into -1, losing the information needed to reject out-of-range input.
+    proc sc_jtaglib_sba_words { value bits name } {
+        variable SBA_WORD_MASK
+
+        if {![string is integer -strict $bits] || $bits < 1 || $bits > 64} {
+            error "SBA bit width must be between 1 and 64"
+        }
+        set digits [string tolower [string trim $value]]
+        set base [switch -- [string range $digits 0 1] {
+            0x      {expr 16}
+            0b      {expr 2}
+            default {expr 10}
+        }]
+        if {$base != 10} {
+            set digits [string range $digits 2 end]
+        }
+        if {$digits eq ""} {
+            error "SBA $name must be an unsigned integer: \"$value\""
+        }
+
+        set low_limit $SBA_WORD_MASK
+        set high_limit 0
+        if {$bits <= 32} {
+            set low_limit [expr {(1 << $bits) - 1}]
+        } else {
+            set high_limit [expr {(1 << ($bits - 32)) - 1}]
+        }
+        set low 0
+        set high 0
+        for {set i 0} {$i < [string length $digits]} {incr i} {
+            set digit [string first [string index $digits $i] 0123456789abcdef]
+            if {$digit < 0 || $digit >= $base} {
+                error "SBA $name must be an unsigned integer: \"$value\""
+            }
+            # Even in base 16, these intermediates use at most 36 bits and fit
+            # in signed 64-bit Jim integers (long long, also on 32-bit hosts).
+            set word [expr {$low * $base + $digit}]
+            set low [expr {$word & $SBA_WORD_MASK}]
+            set high [expr {$high * $base + ($word >> 32)}]
+            if {$high > $high_limit || $low > $low_limit} {
+                error "SBA $name does not fit in $bits bits: \"$value\""
+            }
+        }
+        return [list $low $high]
+    }
+
+    proc sc_jtaglib_sba_validate { sbcs address size } {
+        set version [dict get $sbcs sbversion]
+        if {$version != 1} {
+            error "Unsupported SBA version $version; expected 1"
+        }
+        set address_bits [dict get $sbcs sbasize]
+        if {$address_bits == 0} {
+            error "SBA is not available (sbasize=0)"
+        }
+        if {$address_bits > 64} {
+            error "Unsupported SBA address width $address_bits; maximum is 64 bits"
+        }
+        if {![string is integer -strict $size] ||
+            ($size != 8 && $size != 16 && $size != 32 && $size != 64)} {
+            error "SBA access size must be 8, 16, 32, or 64 bits: \"$size\""
+        }
+        # Capability keys use decimal suffixes, even for sizes such as 0x20.
+        set size [format %d $size]
+        if {![dict get $sbcs sbaccess$size]} {
+            error "SBA does not support native $size-bit access"
+        }
+        set words [sc_jtaglib_sba_words $address $address_bits address]
+        if {([lindex $words 0] & ($size / 8 - 1)) != 0} {
+            error "SBA address \"$address\" is not aligned for $size-bit access"
+        }
+        # An aligned transfer fits a power-of-two address space if its start
+        # fits and the space contains at least one whole transfer.
+        if {$address_bits < [lsearch -exact {8 16 32 64} $size]} {
+            error "SBA address space is too small for $size-bit access"
+        }
+        return $words
+    }
+
+    proc sc_jtaglib_sba_wait_idle { tap_num } {
+        set timeout_ms [sc_jtaglib_get_op_latency]
+        set start_time [clock milliseconds]
+        while {1} {
+            set sbcs [ocdjtag_riscv_get_sbcs $tap_num]
+            if {![dict get $sbcs sbbusy]} {
+                return $sbcs
+            }
+            if {([clock milliseconds] - $start_time) >= $timeout_ms} {
+                error "SBA TAP $tap_num: timed out waiting for sbbusy to clear"
+            }
+        }
+    }
+
+    proc sc_jtaglib_sba_check_errors { sbcs } {
+        set busy_error [dict get $sbcs sbbusyerror]
+        set bus_error [dict get $sbcs sberror]
+        if {!$busy_error && !$bus_error} {
+            return
+        }
+        switch $bus_error {
+            0 {set description "no bus error"}
+            1 {set description "timeout"}
+            2 {set description "bad address"}
+            3 {set description "misaligned access"}
+            4 {set description "unsupported access size"}
+            7 {set description "other bus error"}
+            default {set description "reserved error code"}
+        }
+        if {$busy_error} {
+            append description "; access while busy"
+        }
+        error "SBA error: sbbusyerror=$busy_error, sberror=$bus_error ($description)"
+    }
+
+    proc sc_jtaglib_sba_clear_errors { tap_num sbcs } {
+        variable DM_SBCS
+        variable SBCS_SBACCESS_SHIFT
+        variable SBCS_ERROR_CLEAR
+
+        if {[dict get $sbcs sbbusy]} {
+            error "SBA TAP $tap_num: cannot clear errors while sbbusy is set"
+        }
+        if {![dict get $sbcs sbbusyerror] && ![dict get $sbcs sberror]} {
+            return $sbcs
+        }
+        # Preserve the access size, but disable read triggers/autoincrement.
+        # This prepares for a new request; it never retries the failed access.
+        set control [expr {
+            ([dict get $sbcs sbaccess] << $SBCS_SBACCESS_SHIFT) |
+            $SBCS_ERROR_CLEAR
+        }]
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBCS $control
+        set sbcs [sc_jtaglib_sba_wait_idle $tap_num]
+        sc_jtaglib_sba_check_errors $sbcs
+        return $sbcs
+    }
+
+    # Configure one validated native transfer. Only reads use read-on-address;
+    # neither direction uses read-on-data or autoincrement.
+    proc sc_jtaglib_sba_configure { tap_num size op } {
+        variable DM_SBCS
+        variable SBCS_SBACCESS_SHIFT
+        variable SBCS_SBREADONADDR
+
+        set access [lsearch -exact {8 16 32 64} [format %d $size]]
+        set control [expr {$access << $SBCS_SBACCESS_SHIFT}]
+        if {$op eq "read"} {
+            set control [expr {$control | $SBCS_SBREADONADDR}]
+        }
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBCS $control
+    }
+
+    # Program the upper word, if implemented, before the low word, which may
+    # trigger a read. The caller has validated the DM's 1-64-bit address width.
+    proc sc_jtaglib_sba_set_address { tap_num address_bits words } {
+        variable DM_SBADDRESS0
+        variable DM_SBADDRESS1
+
+        if {$address_bits > 32} {
+            ocdjtag_riscv_dmi_write $tap_num $DM_SBADDRESS1 [lindex $words 1]
+        }
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBADDRESS0 [lindex $words 0]
+    }
+
+    # Collect completed data as two words. Narrow-access masking and display
+    # formatting belong to the caller; unused bits may contain stale data.
+    proc sc_jtaglib_sba_read_data { tap_num size } {
+        variable DM_SBDATA0
+        variable DM_SBDATA1
+
+        set high 0
+        if {$size == 64} {
+            set high [ocdjtag_riscv_dmi_read $tap_num $DM_SBDATA1]
+        }
+        set low [ocdjtag_riscv_dmi_read $tap_num $DM_SBDATA0]
+        return [list $low $high]
+    }
+
+    # Stage validated data before writing the low word, which starts the bus
+    # transfer. A failure leaves recovery to the caller; never repeat a write.
+    proc sc_jtaglib_sba_write_data { tap_num size words } {
+        variable DM_SBDATA0
+        variable DM_SBDATA1
+
+        if {$size == 64} {
+            ocdjtag_riscv_dmi_write $tap_num $DM_SBDATA1 [lindex $words 1]
+        }
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBDATA0 [lindex $words 0]
     }
 
     proc sc_jtaglib_get_tap_data_from_str { str } {
@@ -611,6 +812,39 @@ proc ocdjtag_riscv_get_abstractcs { tap_num } {
 }
 
 #end of getter for DM registers
+
+# Access system memory through the Debug Module without examining the hart.
+# The DM must already be active and authenticated.
+proc ocdjtag_riscv_sba_read { tap_num address size } {
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    set words [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_validate $sbcs $address $size]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_clear_errors $tap_num $sbcs
+
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_configure $tap_num $size read
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_set_address $tap_num [dict get $sbcs sbasize] $words
+
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_check_errors $sbcs
+    set data [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_read_data $tap_num $size]
+    lassign $data low high
+    if {$size == 64} {
+        return [format 0x%08x%08x $high $low]
+    }
+    return [format 0x%0*x [expr {$size / 4}] [expr {$low & ((1 << $size) - 1)}]]
+}
+
+proc ocdjtag_riscv_sba_write { tap_num address size value } {
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    set words [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_validate $sbcs $address $size]
+    set data [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_words $value $size value]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_clear_errors $tap_num $sbcs
+
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_configure $tap_num $size write
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_set_address $tap_num [dict get $sbcs sbasize] $words
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_write_data $tap_num $size $data
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_check_errors $sbcs
+}
 
 # Wait for abstract command completion and report any hardware error.
 proc ocdjtag_riscv_check_cmderr { tap_num } {
