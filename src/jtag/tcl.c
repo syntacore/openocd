@@ -369,6 +369,7 @@ exit:
 }
 
 #define JTAG_EXECUTE_SCAN_START_ARG "scan"
+#define JTAG_EXECUTE_PLAIN_SCAN_START_ARG "plain-scan"
 
 static COMMAND_HELPER(parse_one_scan, unsigned int *cur_arg_p)
 {
@@ -399,13 +400,146 @@ static COMMAND_HELPER(parse_one_scan, unsigned int *cur_arg_p)
 	return ERROR_OK;
 }
 
+static int print_plain_scan(jtag_callback_data_t arg_cmd, jtag_callback_data_t arg_bits,
+		jtag_callback_data_t arg_in_value, jtag_callback_data_t arg_unused)
+{
+	struct command_invocation *cmd = (struct command_invocation *)arg_cmd;
+	unsigned int bits = arg_bits;
+	uint8_t *in_value = (uint8_t *)arg_in_value;
+
+	size_t bytes = DIV_ROUND_UP(bits, 8);
+	size_t str_size =  bytes * 2 + 1;
+	char *in_str = cmd_queue_alloc(str_size);
+	hexify(in_str, in_value, bytes, str_size);
+	command_print(cmd, "%s", in_str);
+	return ERROR_OK;
+}
+
+static COMMAND_HELPER(parse_ir_dr, unsigned int *cur_arg_p, bool *ir_scan)
+{
+	unsigned int cur_arg = *cur_arg_p;
+	if (cur_arg == CMD_ARGC)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	const char *ir_dr_arg = CMD_ARGV[cur_arg++];
+	if (strcmp(ir_dr_arg, JTAG_EXECUTE_SCAN_IR_START_ARG) == 0)
+		*ir_scan = true;
+	else if (strcmp(ir_dr_arg, JTAG_EXECUTE_SCAN_DR_START_ARG) == 0)
+		*ir_scan = false;
+	else
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	*cur_arg_p = cur_arg;
+	return ERROR_OK;
+}
+
+static COMMAND_HELPER(n_bits_range_error, const char *bits_str, unsigned int max_bits, int range_error)
+{
+	command_print(CMD, "Number of bits (%s) is out of [1, %u]", bits_str, max_bits);
+	return range_error;
+}
+
+static COMMAND_HELPER(parse_n_bits, unsigned int *cur_arg_p, unsigned int *n_bits)
+{
+	unsigned int cur_arg = *cur_arg_p;
+	if (cur_arg == CMD_ARGC)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	const char *bits_str = CMD_ARGV[cur_arg++];
+	char *end;
+	errno = 0;
+	long signed_bits = strtol(bits_str, &end, 0);
+	if (strlen(end)) {
+		errno = 0;
+		command_print(CMD, "Expecting a number of bits, got '%s'", bits_str);
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+	long max_bits = MIN(UINT_MAX, LONG_MAX);
+	/* 640K of memory should be enough for anybody. */
+	max_bits = max_bits / 8 / 1024 > 640 ? 640 * 8 * 1024 : max_bits;
+	if (errno == ERANGE) {
+		errno = 0;
+		return CALL_COMMAND_HANDLER(n_bits_range_error, bits_str,
+				max_bits, ERROR_COMMAND_ARGUMENT_OVERFLOW);
+	}
+	if (signed_bits <= 0)
+		return CALL_COMMAND_HANDLER(n_bits_range_error, bits_str,
+				max_bits, ERROR_COMMAND_ARGUMENT_UNDERFLOW);
+
+	if (signed_bits > max_bits)
+		return CALL_COMMAND_HANDLER(n_bits_range_error, bits_str,
+				max_bits, ERROR_COMMAND_ARGUMENT_OVERFLOW);
+
+	assert(signed_bits > 0 && (unsigned long)signed_bits <= UINT_MAX);
+	*n_bits = signed_bits;
+	*cur_arg_p = cur_arg;
+	return ERROR_OK;
+}
+
+static COMMAND_HELPER(parse_scan_value, unsigned int *cur_arg_p, size_t value_size,
+		uint8_t **out_value_p)
+{
+	unsigned int cur_arg = *cur_arg_p;
+	if (cur_arg == CMD_ARGC)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	const char *hex_str = CMD_ARGV[cur_arg++];
+	uint8_t *out_value = cmd_queue_alloc(value_size);
+	if (unhexify(out_value, hex_str, value_size) != value_size) {
+		command_print(CMD, "'%s' is not a valid string of hexadecimal pairs", hex_str);
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+	*cur_arg_p = cur_arg;
+	*out_value_p = out_value;
+	return ERROR_OK;
+}
+
+static COMMAND_HELPER(parse_one_plain_scan, unsigned int *cur_arg_p)
+{
+	unsigned int cur_arg = *cur_arg_p;
+	bool ir_scan;
+	int res = CALL_COMMAND_HANDLER(parse_ir_dr, &cur_arg, &ir_scan);
+	if (res != ERROR_OK)
+		return res;
+
+	unsigned int bits;
+	res = CALL_COMMAND_HANDLER(parse_n_bits, &cur_arg, &bits);
+	if (res != ERROR_OK)
+		return res;
+
+	size_t value_size = DIV_ROUND_UP(bits, 8);
+	uint8_t *out_value;
+	res = CALL_COMMAND_HANDLER(parse_scan_value, &cur_arg, value_size, &out_value);
+	if (res != ERROR_OK)
+		return res;
+
+	enum tap_state endstate;
+	res = CALL_COMMAND_HANDLER(parse_endstate, &cur_arg, &endstate);
+	if (res != ERROR_OK)
+		return res;
+
+	uint8_t *in_value = cmd_queue_alloc(value_size);
+	(ir_scan ? jtag_add_plain_ir_scan : jtag_add_plain_dr_scan)(bits, out_value, in_value, endstate);
+	jtag_add_callback4(print_plain_scan,
+			(jtag_callback_data_t)CMD,
+			(jtag_callback_data_t)bits,
+			(jtag_callback_data_t)in_value,
+			0);
+	*cur_arg_p = cur_arg;
+	return ERROR_OK;
+}
+
 static COMMAND_HELPER(jtag_execute_parse_one_command, unsigned int *cur_arg_p)
 {
 	unsigned int cur_arg = *cur_arg_p;
 	/* TODO: support other command types. */
-	if (strcmp(JTAG_EXECUTE_SCAN_START_ARG, CMD_ARGV[cur_arg++]))
-		return ERROR_COMMAND_ARGUMENT_INVALID;
-	int res = CALL_COMMAND_HANDLER(parse_one_scan, &cur_arg);
+	int res = ERROR_COMMAND_ARGUMENT_INVALID;
+	const char *subcommand = CMD_ARGV[cur_arg++];
+	if (!strcmp(JTAG_EXECUTE_SCAN_START_ARG, subcommand))
+		res = CALL_COMMAND_HANDLER(parse_one_scan, &cur_arg);
+	else if (!strcmp(JTAG_EXECUTE_PLAIN_SCAN_START_ARG, subcommand))
+		res = CALL_COMMAND_HANDLER(parse_one_plain_scan, &cur_arg);
+
 	if (res == ERROR_OK)
 		*cur_arg_p = cur_arg;
 	return res;
@@ -1024,6 +1158,10 @@ static const struct command_registration jtag_subcommand_handlers[] = {
 			"' ir_value+ ['" JTAG_EXECUTE_SCAN_ENDSTATE_NEXT_ARG
 			"' tap_state]] ['" JTAG_EXECUTE_SCAN_DR_START_ARG
 			"' scan_fields+ ['" JTAG_EXECUTE_SCAN_ENDSTATE_NEXT_ARG
+			"' tap_state]] | 'plain-scan' ['" JTAG_EXECUTE_SCAN_IR_START_ARG
+			"' n_bits hex_value ['" JTAG_EXECUTE_SCAN_ENDSTATE_NEXT_ARG
+			"' tap_state]] ['" JTAG_EXECUTE_SCAN_DR_START_ARG
+			"' n_bits hex_value ['" JTAG_EXECUTE_SCAN_ENDSTATE_NEXT_ARG
 			"' tap_state]]]+",
 	},
 	{

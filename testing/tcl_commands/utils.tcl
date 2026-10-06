@@ -30,6 +30,27 @@ namespace eval testing_helpers {
 		tailcall check_for_error 1 {} $script
 	}
 
+	proc check_error_code {expctd_code script} {
+		set code [catch {uplevel 1 $script} msg opts]
+		if {!$code} {
+			test_failure \
+				"'$script' finished successfully. \
+				Was expecting an error with errorcode '$expctd_code'."
+		}
+		if {$code != 1} {
+			test_failure \
+				"'$script' returned unexpected error code $code. \
+				Was expecting 1. Error message: '$msg'"
+		}
+		set actual [dict get $opts -errorcode]
+		set n [llength $expctd_code]
+		if {[lrange $actual 0 [expr {$n - 1}]] ne $expctd_code} {
+			test_failure \
+				"'$script' produced errorcode '$actual'. \
+				Was expecting errorcode class '$expctd_code'. Error message: '$msg'"
+		}
+	}
+
 	proc check_invalid_arg script {
 		tailcall check_for_error -603 {} $script
 	}
@@ -54,8 +75,8 @@ namespace eval testing_helpers {
 			Was expecting '$pattern'."
 	}
 
-	namespace export check_generic_error check_invalid_arg check_syntax_err \
-		check_overflow_err check_underflow_err check_matches
+	namespace export check_generic_error check_error_code check_invalid_arg \
+		check_syntax_err check_overflow_err check_underflow_err check_matches
 }
 
 namespace eval jtag_dummy_testing {

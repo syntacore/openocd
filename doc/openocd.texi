@@ -12550,6 +12550,8 @@ to execute before they take effect.
 @deffn {Command} {jtag execute} [@option{scan} @var{tap_name}+
 [@option{-ir} @var{ir_value}+ [@option{-endstate} @var{tap_state}]]
 [@option{-dr} @var{scan_fields}+ [@option{-endstate} @var{tap_state}]]]
+[@option{plain-scan} (@option{-ir}|@option{-dr}) @var{n_bits} @var{value}
+[@option{-endstate} @var{tap_state}]]
 
 Executes a queue of commands:
 @itemize @bullet
@@ -12569,6 +12571,30 @@ the field. The second one is the value.
 @item For a data register scan, a single bit is shifted into inactive TAPs.
 @item @var{tap_state} specifies the state the in which the chain should end up
 after the scan.
+@end itemize
+@item @option{plain-scan} queues a raw bit scan through the chain, independent
+of the declared TAPs.
+@itemize @bullet
+@item Unlike @option{scan}, no TAP names are required and the same bits are
+shifted through every TAP in the chain. This is useful for chain-level queries,
+such as discovering an unknown JTAG chain before any TAPs are declared.
+@item @option{-ir} indicates instruction register scan.
+@item @option{-dr} indicates data register scan.
+@item @var{n_bits} is the number of bits to scan.
+@item @var{value} is a string of hexadecimal pairs with the value to shift into
+the chain. The value is shifted into the chain least significant bit first: bit
+0 of the value is the first bit shifted onto the TDI.
+@item The value captured from the chain is returned as a hexadecimal string in
+the same format: bit 0 of the returned value is the first bit returned on the
+TDO.
+@item @var{tap_state} specifies the state the in which the chain should end up
+after the scan.
+@item For example, to shift the bit sequence @code{1 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1}
+of a TAP instruction register into the chain (bit 0 of the value @code{01ff}
+comes first):
+@example
+jtag execute plain-scan -ir 16 01ff
+@end example
 @end itemize
 @end itemize
 @end deffn
