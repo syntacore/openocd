@@ -823,7 +823,7 @@ proc expectForTargetExamination { OpenOCDSpawnID TimeoutValue } {
   set timeout $TimeoutValue
   expect {
     -i $OpenOCDSpawnID
-    "Target successfully examined." {
+    "Examination succeed" {
     }
     timeout {
       printErrorMessage "timeout detected during target examine"
