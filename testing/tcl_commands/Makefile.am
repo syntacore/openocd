@@ -10,10 +10,14 @@ TESTS += \
 	test-irscan-command.cfg \
 	test-drscan-command.cfg \
 	test-target-smp-command.cfg
+
+TESTS += syntacore/examine-jtag-chain.cfg
 endif
 
 EXTRA_DIST = utils.tcl $(TESTS)
 
 TEST_EXTENSIONS = .cfg
 CFG_LOG_COMPILER = $(top_builddir)/src/openocd
-AM_CFG_LOG_FLAGS = -f $(abs_srcdir)/utils.tcl -f
+AM_CFG_LOG_FLAGS = -f $(abs_srcdir)/utils.tcl \
+		   -s $(top_srcdir)/tcl \
+		   -f

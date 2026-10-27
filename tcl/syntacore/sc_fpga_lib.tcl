@@ -140,7 +140,7 @@ namespace eval _SC_INTERNALS {
                                                    en_ir
                                                    pmu_ctrs } {
         set pmu_ctrs [lsort -unique $pmu_ctrs]
-        if {[llength pmu_ctrs] > $pmu_ctrs_max} {
+        if {[llength $pmu_ctrs] > $pmu_ctrs_max} {
             error "too many PMU counters requested was requested"
         }
         set inhibit_value 0xffffffff

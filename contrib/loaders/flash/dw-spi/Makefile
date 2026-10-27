@@ -12,6 +12,15 @@ ifeq ($(TOOLCHAIN),mipsel-linux-gnu-)
 	CFLAGS+= -march=24kec
 endif
 
+ifeq ($(TOOLCHAIN),riscv64-linux-gnu-)
+	CFLAGS+= -march=rv64im -mabi=lp64
+endif
+
+ifeq ($(TOOLCHAIN),riscv64-unknown-elf-)
+	CFLAGS+= -march=rv64im -mabi=lp64 \
+		-isystem /usr/lib/picolibc/riscv64-unknown-elf/include
+endif
+
 all: \
 	$(TOOLCHAIN)transaction.inc \
 	$(TOOLCHAIN)erase.inc \

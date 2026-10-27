@@ -26,7 +26,7 @@
  *
  * @param[in] arg: Function arguments.
  */
-__attribute__((section(".transaction"))) void
+__attribute__((section(".transaction"), naked)) void
 transaction(struct dw_spi_transaction *arg)
 {
 	register uint8_t *buffer_tx = (uint8_t *)arg->buffer;
@@ -61,7 +61,7 @@ transaction(struct dw_spi_transaction *arg)
  *
  * @param[in] arg: Function arguments.
  */
-__attribute__((section(".check_fill"))) void
+__attribute__((section(".check_fill"), naked)) void
 check_fill(struct dw_spi_check_fill *arg)
 {
 	register uint32_t tx_size;
@@ -128,7 +128,7 @@ check_fill(struct dw_spi_check_fill *arg)
  *
  * @param[in] arg: Function arguments.
  */
-__attribute__((section(".erase"))) void
+__attribute__((section(".erase"), naked)) void
 erase(struct dw_spi_erase *arg)
 {
 	register uint32_t address = arg->address;
@@ -154,7 +154,7 @@ erase(struct dw_spi_erase *arg)
  *
  * @param[in] arg: Function arguments.
  */
-__attribute__((section(".program"))) void
+__attribute__((section(".program"), naked)) void
 program(struct dw_spi_program *arg)
 {
 	register uint8_t *buffer = (uint8_t *)arg->buffer;
@@ -192,7 +192,7 @@ program(struct dw_spi_program *arg)
  *
  * @param[in] arg: Function arguments.
  */
-__attribute__((section(".read"))) void
+__attribute__((section(".read"), naked)) void
 read(struct dw_spi_read *arg)
 {
 	register uint32_t tx_size = arg->buffer_size;
