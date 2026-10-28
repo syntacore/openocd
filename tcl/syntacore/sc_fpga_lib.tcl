@@ -253,7 +253,7 @@ proc sc_fpga_write_reg { reg_name value } {
 proc sc_fpga_halt_all {} {
     # TODO: take into account cases when several SMP groups are present or
     # there are targets that does not belong to any SMP group
-    if {[string trim [smp]] eq "off"} {
+    if {[string trim [riscv smp]] eq "off"} {
         _SC_INTERNALS::apply_for_each_target halt
     } else {
         halt
@@ -264,7 +264,7 @@ proc sc_fpga_halt_all {} {
 proc sc_fpga_resume_all { { addr "" } } {
     # TODO: take into account cases when several SMP groups are present or
     # there are targets that does not belong to any SMP group
-    if {[string trim [smp]] eq "off"} {
+    if {[string trim [riscv smp]] eq "off"} {
         _SC_INTERNALS::apply_for_each_target _SC_INTERNALS::sc_lib_do_resume $addr
     } else {
         _SC_INTERNALS::sc_lib_do_resume $addr
@@ -360,7 +360,7 @@ proc sc_fpga_info {} {
         [list \
             "Version: [version]" \
             "Number of harts: [llength [target names]]" \
-            "SMP status: [string trim [smp]]" \
+            "SMP status: [string trim [riscv smp]]" \
         ] "\n"]
 }
 
