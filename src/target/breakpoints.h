@@ -47,10 +47,9 @@ struct watchpoint {
 	bool is_set;
 	unsigned int number;
 	struct watchpoint *next;
-	uint32_t unique_id;
+	int unique_id;
 };
 
-int breakpoint_clear_target(struct target *target);
 int breakpoint_add(struct target *target,
 		target_addr_t address, unsigned int length, enum breakpoint_type type);
 int context_breakpoint_add(struct target *target,
@@ -69,7 +68,6 @@ static inline void breakpoint_hw_set(struct breakpoint *breakpoint, unsigned int
 	breakpoint->number = hw_number;
 }
 
-int watchpoint_clear_target(struct target *target);
 int watchpoint_add(struct target *target,
 		target_addr_t address, unsigned int length,
 		enum watchpoint_rw rw, uint64_t value, uint64_t mask);
@@ -88,5 +86,7 @@ static inline void watchpoint_set(struct watchpoint *watchpoint, unsigned int nu
 
 #define ERROR_BREAKPOINT_NOT_FOUND (-1600)
 #define ERROR_WATCHPOINT_NOT_FOUND (-1601)
+#define ERROR_BREAKPOINT_DUPLICATED (-1602)
+#define ERROR_BREAKPOINT_OVERLAPPED (-1603)
 
 #endif /* OPENOCD_TARGET_BREAKPOINTS_H */

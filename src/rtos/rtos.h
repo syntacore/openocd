@@ -46,18 +46,14 @@ struct rtos {
 	struct thread_detail *thread_details;
 	int thread_count;
 	int (*gdb_thread_packet)(struct connection *connection, char const *packet, int packet_size);
-	int (*gdb_target_for_threadid)(struct connection *connection, threadid_t thread_id, struct target **p_target);
+	int (*gdb_target_for_threadid)(struct connection *connection, int64_t thread_id, struct target **p_target);
 	void *rtos_specific_params;
-	/* Populated in rtos.c, so that individual RTOSes can register commands. */
-	struct command_context *cmd_ctx;
 };
 
 struct rtos_reg {
 	uint32_t number;
 	uint32_t size;
 	uint8_t value[16];
-	/* WARNING: rtos_get_gdb_reg() relies on the fact that value is the last
-	 * element of this struct. Any new fields should be added *before* value. */
 };
 
 struct rtos_type {
@@ -67,7 +63,7 @@ struct rtos_type {
 	int (*smp_init)(struct target *target);
 	int (*update_threads)(struct rtos *rtos);
 	/** Return a list of general registers, with their values filled out. */
-	int (*get_thread_reg_list)(struct rtos *rtos, threadid_t thread_id,
+	int (*get_thread_reg_list)(struct rtos *rtos, int64_t thread_id,
 			struct rtos_reg **reg_list, int *num_regs);
 	/** Return the size and value of the specified reg_num. The value is
 	 * allocated by the callee and freed by the caller. */
@@ -77,13 +73,6 @@ struct rtos_type {
 	int (*clean)(struct target *target);
 	char * (*ps_command)(struct target *target);
 	int (*set_reg)(struct rtos *rtos, uint32_t reg_num, uint8_t *reg_value);
-	/**
-	 * Possibly work around an annoying gdb behaviour: when the current thread
-	 * is changed in gdb, it assumes that the target can follow and also make
-	 * the thread current. This is an assumption that cannot hold for a real
-	 * target running a multi-threading OS. If an RTOS can do this, override
-	 * needs_fake_step(). */
-	bool (*needs_fake_step)(struct target *target, threadid_t thread_id);
 	/* Implement these if different threads in the RTOS can see memory
 	 * differently (for instance because address translation might be different
 	 * for each thread). */
@@ -91,6 +80,13 @@ struct rtos_type {
 			uint8_t *buffer);
 	int (*write_buffer)(struct rtos *rtos, target_addr_t address, uint32_t size,
 			const uint8_t *buffer);
+	/**
+	 * Possibly work around an annoying gdb behaviour: when the current thread
+	 * is changed in gdb, it assumes that the target can follow and also make
+	 * the thread current. This is an assumption that cannot hold for a real
+	 * target running a multi-threading OS. If an RTOS can do this, override
+	 * needs_fake_step(). */
+	bool (*needs_fake_step)(struct target *target, int64_t thread_id);
 	/* When a software breakpoint is set, it is set on only one target,
 	 * because we assume memory is shared across them. By default this is the
 	 * first target in the SMP group. Override this function to have
@@ -108,9 +104,8 @@ struct stack_register_offset {
 };
 
 struct rtos_register_stacking {
-	unsigned stack_registers_size;
-	int stack_growth_direction;
-	/* The number of gdb general registers, in order. */
+	unsigned char stack_registers_size;
+	signed char stack_growth_direction;
 	unsigned char num_output_registers;
 	/* Some targets require evaluating the stack to determine the
 	 * actual stack pointer for a process.  If this field is NULL,
@@ -122,11 +117,6 @@ struct rtos_register_stacking {
 		const struct rtos_register_stacking *stacking,
 		target_addr_t stack_ptr);
 	const struct stack_register_offset *register_offsets;
-	/* Total number of registers on the stack, including the general ones. This
-	 * may be 0 if there are no additional registers on the stack beyond the
-	 * general ones. */
-	unsigned int total_register_count;
-
 	/* Optional field for targets which may have to implement their own stack read function.
 	 * Because stack format can be weird or stack data needed to be edited before passing to the gdb.
 	 */
@@ -145,17 +135,9 @@ int rtos_set_reg(struct connection *connection, int reg_num,
 		uint8_t *reg_value);
 int rtos_generic_stack_read(struct target *target,
 		const struct rtos_register_stacking *stacking,
-		target_addr_t stack_ptr,
+		int64_t stack_ptr,
 		struct rtos_reg **reg_list,
 		int *num_regs);
-int rtos_generic_stack_read_reg(struct target *target,
-								const struct rtos_register_stacking *stacking,
-								target_addr_t stack_ptr,
-								uint32_t reg_num, struct rtos_reg *reg);
-int rtos_generic_stack_write_reg(struct target *target,
-								const struct rtos_register_stacking *stacking,
-								target_addr_t stack_ptr,
-								uint32_t reg_num, uint8_t *reg_value);
 int gdb_thread_packet(struct connection *connection, char const *packet, int packet_size);
 int rtos_thread_packet(struct connection *connection, const char *packet, int packet_size);
 int rtos_get_gdb_reg(struct connection *connection, int reg_num);
@@ -165,15 +147,20 @@ void rtos_free_threadlist(struct rtos *rtos);
 int rtos_smp_init(struct target *target);
 /*  function for handling symbol access */
 int rtos_qsymbol(struct connection *connection, char const *packet, int packet_size);
-bool rtos_needs_fake_step(struct target *target, threadid_t thread_id);
 int rtos_read_buffer(struct target *target, target_addr_t address,
 		uint32_t size, uint8_t *buffer);
 int rtos_write_buffer(struct target *target, target_addr_t address,
 		uint32_t size, const uint8_t *buffer);
+bool rtos_needs_fake_step(struct target *target, int64_t thread_id);
 struct target *rtos_swbp_target(struct target *target, target_addr_t address,
 				uint32_t length, enum breakpoint_type type);
-struct rtos *rtos_of_target(struct target *target);
+/**
+ * Get the RTOS from the target itself, or from one of the targets in
+ * the same SMP node, or NULL when no RTOS is set.
+ */
+struct rtos *rtos_from_target(struct target *target);
 
+// Keep in alphabetic order this list of rtos
 extern const struct rtos_type chibios_rtos;
 extern const struct rtos_type chromium_ec_rtos;
 extern const struct rtos_type ecos_rtos;
