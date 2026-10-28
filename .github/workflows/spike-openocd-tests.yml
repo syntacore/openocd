@@ -116,7 +116,7 @@ jobs:
               --gdb /opt/riscv/toolchain/bin/riscv-none-elf-gdb \
               --sim_cmd /opt/riscv/spike/bin/spike \
               --server_cmd $GITHUB_WORKSPACE/src/openocd \
-			  --exclude-tests $GITHUB_WORKSPACE/testing/excludes.yaml
+              --exclude-tests $GITHUB_WORKSPACE/testing/riscv-tests/excludes.yaml
 
       - name: Run Spike64-2 Tests
         if: success() || steps.spike32-tests.conclusion == 'failure'
