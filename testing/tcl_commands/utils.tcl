@@ -33,7 +33,7 @@ namespace eval testing_helpers {
 	}
 
 	proc check_generic_error script {
-		tailcall check_for_error 1 {} $script
+		tailcall check_for_error {} {} $script
 	}
 
 	proc check_error_code {expctd_code script} {
