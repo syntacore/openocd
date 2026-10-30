@@ -639,6 +639,9 @@ This is deprecated from Linux v5.3; prefer using @b{linuxgpiod}.
 @* A JTAG driver that works with the WCH CH347F and CH347T chips.
 When using the CH347T, it must be configured to operate in mode 3 (UART + JTAG).
 
+@item @b{eud}
+@* An SWD driver to communicate with the built-in Embedded USB Debugger block found on various Qualcomm SoCs.
+
 @end itemize
 
 @node About Jim Tcl
@@ -1734,7 +1737,7 @@ use it later on when defining debug targets:
 
 @example
 set _TARGETNAME $_CHIPNAME.cpu
-target create $_TARGETNAME arm7tdmi -chain-position $_TARGETNAME
+target create $_TARGETNAME arm7tdmi -tap $_TARGETNAME
 @end example
 
 @subsection Adding TAPs to the Scan Chain
@@ -1792,7 +1795,7 @@ to little endian, and this chip doesn't support changing that.
 
 @example
 set _TARGETNAME $_CHIPNAME.cpu
-target create $_TARGETNAME arm7tdmi -chain-position $_TARGETNAME
+target create $_TARGETNAME arm7tdmi -tap $_TARGETNAME
 @end example
 
 Work areas are small RAM areas associated with CPU targets.
@@ -1814,9 +1817,9 @@ After setting targets, you can define a list of targets working in SMP.
 @example
 set _TARGETNAME_1 $_CHIPNAME.cpu1
 set _TARGETNAME_2 $_CHIPNAME.cpu2
-target create $_TARGETNAME_1 cortex_a -chain-position $_CHIPNAME.dap \
+target create $_TARGETNAME_1 cortex_a -tap $_CHIPNAME.dap \
 -coreid 0 -dbgbase $_DAP_DBG1
-target create $_TARGETNAME_2 cortex_a -chain-position $_CHIPNAME.dap \
+target create $_TARGETNAME_2 cortex_a -tap $_CHIPNAME.dap \
 -coreid 1 -dbgbase $_DAP_DBG2
 #define 2 targets working in smp.
 target smp $_CHIPNAME.cpu2 $_CHIPNAME.cpu1
@@ -2614,6 +2617,33 @@ mitigates the problem.
 
 The driver supports activity LED through the generic
 command @ref{adapter gpio, @command{adapter gpio led}}.
+
+In SWD mode the TRST pin is not needed as a JTAG signal, so the driver drives
+it as a GPIO to provide SRST. TRST is pin 9 on both chips, but has a different
+GPIO number: GPIO5 on the CH347T and GPIO3 on the CH347F. Use
+@ref{adapter gpio, @command{adapter gpio srst}} to select a different GPIO or
+to change the polarity. On the CH347T, SRST is not available in JTAG mode,
+where the pin carries TRST. On the CH347F, pin 8 is the JTAG interface
+system reset output. It is not shared with a GPIO.
+After the adapter powers up, pin 8 strongly drives low and holds a wired
+target in reset. JTAG initialization therefore always enables this output
+and then drives it high. SWD does not use this output. Pin 8 is active-low
+and push-pull.
+
+Not every GPIO can be used, because the GPIO's share their pins with the
+interface signals. Only GPIO3 to GPIO6 are free on the CH347T, and GPIO0 to
+GPIO3 on the CH347F, where GPIO4 to GPIO7 are TCK, TDO, TDI and TMS. Note that
+GPIO3 of the CH347F is TRST, so it is only free when TRST is unused.
+
+SRST and the activity LED cannot share a GPIO. If both are assigned to the
+same pin, SRST gets disabled.
+
+The SRST GPIO follows the drive mode of @ref{reset_config,,@command{reset_config}}.
+The default is open drain, which the driver emulates by switching the pin to an
+input instead of driving it to the inactive level, so the reset line needs a
+pull-up. Use @command{reset_config srst_push_pull} if it has none. This GPIO
+emulation is not used for the CH347F dedicated output on pin 8.
+
 @end deffn
 
 @deffn {Interface Driver} {cklink}
@@ -3144,6 +3174,8 @@ The following example shows how to read 4 bytes from the EMUCOM channel 0x0:
 @end example
 @end deffn
 @deffn {Config Command} {jlink usb} <@option{0} to @option{3}>
+@b{Note:} This command is deprecated and will be removed in the future.
+
 Set the USB address of the interface, in case more than one adapter is connected
 to the host. If not specified, USB addresses are not considered. Device
 selection via USB address is not always unambiguous. It is recommended to use
@@ -3886,6 +3918,17 @@ Set the emulated address and address window size. Both of these
 parameters must be aligned to page size.
 @end deffn
 
+@deffn {Interface Driver} {rshim}
+
+rshim is a user-space host driver and management interface for
+NVIDIA (formerly Mellanox) BlueField DPUs and SoCs.
+It enables direct access to the Arm Debug Access Port (DAP) on BlueField devices.
+
+@deffn {Config Command} {rshim device} device_path
+Set the rshim device path (default: /dev/rshim0/rshim).
+@end deffn
+@end deffn
+
 @deffn {Interface Driver} {xvc}
 This driver implements bitbang mode of JTAG devices
 using Xilinx Virtual Cable messages over TCP/IP.
@@ -3913,6 +3956,18 @@ Specifies the hostname of the remote debugger or UNIX socket to connect to.
 Specifies the port of the remote process to connect to.
 '0' is a special case where UNIX sockets are used.
 @end deffn
+
+@end deffn
+
+@deffn {Interface Driver} {eud}
+The EUD (Embedded USB Debugger) is a multi-function debug IP found on a
+plethora of Qualcomm SoCs. When enabled and put into debug mode (the
+other mode being bypass), it hijacks a USB port of the device and
+exposes a USB hub on it, with a number of debug devices (control,
+ATB trace, JTAG, SWD and COM port).
+
+This OpenOCD driver configures the SWD sub-device to allow debugging
+over that protocol.
 
 @end deffn
 
@@ -4001,7 +4056,7 @@ The concept of TAPs does not fit in the protocol since SWIM does not implement
 a scan chain. Nevertheless, the current SW model of OpenOCD requires defining a
 virtual SWIM TAP through the command @command{swim newtap basename tap_type}.
 The TAP definition must precede the target definition command
-@command{target create target_name stm8 -chain-position basename.tap_type}.
+@command{target create target_name stm8 -tap basename.tap_type}.
 
 @anchor{jtagspeed}
 @section JTAG Speed
@@ -4895,12 +4950,12 @@ Since OpenOCD version 0.11.0, the Debug Access Port (DAP) is
 no longer implicitly created together with the target. It must be
 explicitly declared using the @command{dap create} command. For all ARMv6-M, ARMv7
 and ARMv8 targets, the option "@option{-dap} @var{dap_name}" has to be used
-instead of "@option{-chain-position} @var{dotted.name}" when the target is created.
+instead of "@option{-tap} @var{dotted.name}" when the target is created.
 
 The @command{dap} command group supports the following sub-commands:
 
 @anchor{dap_create}
-@deffn {Command} {dap create} dap_name @option{-chain-position} dotted.name configparams...
+@deffn {Command} {dap create} dap_name @option{-tap} dotted.name configparams...
 Declare a DAP instance named @var{dap_name} linked to the JTAG tap
 @var{dotted.name}. This also creates a new command (@command{dap_name})
 which is used for various purposes including additional configuration.
@@ -5260,7 +5315,7 @@ to be much more board-specific.
 The key steps you use might look something like this
 
 @example
-dap create mychip.dap -chain-position mychip.cpu
+dap create mychip.dap -tap mychip.cpu
 target create MyTarget cortex_m -dap mychip.dap
 MyTarget configure -work-area-phys 0x08000 -work-area-size 8096
 MyTarget configure -event reset-deassert-pre @{ jtag_rclk 5 @}
@@ -5304,7 +5359,7 @@ purposes including additional configuration.
 @item @var{target_name} ... is the name of the debug target.
 By convention this should be the same as the @emph{dotted.name}
 of the TAP associated with this target, which must be specified here
-using the @code{-chain-position @var{dotted.name}} configparam.
+using the @code{-tap @var{dotted.name}} configparam.
 
 This name is also used to create the target object command,
 referred to here as @command{$target_name},
@@ -5314,7 +5369,7 @@ and in other places the target needs to be identified.
 @command{$target_name configure} are permitted.
 If the target is big-endian, set it here with @code{-endian big}.
 
-You @emph{must} set the @code{-chain-position @var{dotted.name}} or
+You @emph{must} set the @code{-tap @var{dotted.name}} or
 @code{-dap @var{dap_name}} here.
 @end itemize
 @end deffn
@@ -5331,7 +5386,7 @@ and changing its endianness.
 
 @itemize @bullet
 
-@item @code{-chain-position} @var{dotted.name} -- names the TAP
+@item @code{-tap} @var{dotted.name} -- names the TAP
 used to access this target.
 
 @item @code{-dap} @var{dap_name} -- names the DAP used to access
@@ -5554,6 +5609,36 @@ memory at address 0x20000000:
 
 @example
 read_memory 0x20000000 32 2
+@end example
+@end deffn
+
+@anchor{target_calculate_checksum}
+@deffn {Command} {$target_name calculate_checksum} address size
+Calculates the checksum of the memory region starting at @var{address} with a
+length of @var{size}.
+
+The checksum algorithm uses a 32-bit cyclic redundancy check (CRC) with the
+polynomial @code{0x04c11db7} and an initial seed of @code{0xffffffff}. There is
+no input or output reflection, and the XOR output mask is @code{0x00000000}.
+
+If available, the checksum is calculated on the target device using a loader
+function executed in the working area. This accelerates the calculation and
+avoids transferring the memory contents to the host.
+
+For example, to calculate the checksum of 1 KiB starting at address
+@code{0x08000000}, use the following command:
+@example
+calculate_checksum 0x08000000 1024
+0x4fae1a88
+@end example
+
+In Python, for example, the checksum for verification can be calculated as
+follows:
+@example
+from crccheck.crc import Crc32Mpeg2
+
+data = b'deadbeef'
+checksum = Crc32Mpeg2.calc(data, initvalue=0xffffffff)
 @end example
 @end deffn
 
@@ -6090,7 +6175,9 @@ explicitly as @option{bin} (binary), @option{ihex} (Intel hex),
 @option{elf} (ELF file), @option{s19} (Motorola s19).
 @option{mem}, or @option{builder}.
 The relevant flash sectors will be erased prior to programming
-if the @option{erase} parameter is given. If @option{unlock} is
+if the @option{erase} parameter is given. @option{erase}
+is silently ignored for banks without erase support.
+If @option{unlock} is
 provided, then the flash banks are unlocked before erase and
 program. The flash bank to use is inferred from the address of
 each image section.
@@ -6340,7 +6427,7 @@ command, see below.
 For the bitstreams generated from @file{xilinx_bscan_spi.py} this is the
 @var{USER1} instruction.
 @example
-target create $_TARGETNAME testee -chain-position $_CHIPNAME.tap
+target create $_TARGETNAME testee -tap $_CHIPNAME.tap
 set _USER1_INSTR_CODE 0x02
 flash bank $_FLASHNAME jtagspi 0x0 0 0 0 \
            $_TARGETNAME $_USER1_INSTR_CODE
@@ -6352,7 +6439,7 @@ given during creation of the pld device.
 Pld device names are shown by the @command{pld devices} command.
 
 @example
-target create $_TARGETNAME testee -chain-position $_CHIPNAME.tap
+target create $_TARGETNAME testee -tap $_CHIPNAME.tap
 set _JTAGSPI_CHAIN_ID $_CHIPNAME.pld
 flash bank $_FLASHNAME jtagspi 0x0 0 0 0 \
            $_TARGETNAME -pld $_JTAGSPI_CHAIN_ID
@@ -6609,6 +6696,30 @@ flash bank $_FLASHNAME mrvlqspi 0x0 0 0 0 $_TARGETNAME 0x46010000
 
 @end deffn
 
+@deffn {Flash Driver} {max32xxx_qspi}
+@cindex Maxim Integrated MAX32xxx QSPI Interface
+@cindex QuadSPI
+@cindex max32xxx_qspi
+Driver for QSPI flash controller found on Maxim Integrated MAX32xxx series
+microcontrollers (now part of Analog Devices). Supports flash devices with
+memory-mapped read access and automatic device detection via SFDP.
+
+@example
+flash bank $_FLASHNAME max32xxx_qspi 0x8000000 0x0800000 0 0 $_TARGETNAME 0x0
+@end example
+
+@deffn {Command} {max32xxx_qspi reset_deassert} bank_id
+Complete QSPI setup by configuring the controller for memory-mapped operation.
+This is the final step that enables cache, sets read modes, configures security
+options, and prepares the flash for normal access.
+@end deffn
+
+@deffn {Command} {max32xxx_qspi mass_erase} bank_id
+Mass erase entire flash device (if supported by device).
+@end deffn
+
+@end deffn
+
 @deffn {Flash Driver} {ath79}
 @cindex Atheros ath79 SPI driver
 @cindex ath79
@@ -6790,6 +6901,70 @@ the flash.
 @end deffn
 @end deffn
 
+@deffn {Flash Driver} {am13}
+@cindex am13
+@cindex AM13E230X
+All Texas Instruments AM13E230X ARM Cortex-M33 microcontrollers include
+internal flash. The @var{am13} flash driver probes the device by reading
+the JTAGIDCODE (DID) register and the SRAMFLASH info register to
+determine the flash and SRAM sizes automatically.
+
+Two flash regions are supported:
+
+@itemize @bullet
+@item @b{MAIN} flash: starts at address @code{0x00000000}; size is
+auto-detected (typically 256 KB or 512 KB in 2 KB sectors).
+@item @b{NONMAIN} flash: starts at address @code{0x60100000}; sector 0 of each
+bank's NONMAIN region (NM0, at @code{0x60100000} and @code{0x60101000}) is
+BCR-protected and skipped by OpenOCD. The reprogrammable sectors are NM1 of
+each bank (@code{0x60100800} and @code{0x60101800}); size is
+@math{num_banks * 4096} bytes.
+@end itemize
+
+@b{Write strategy}: the driver loads a ping-pong flash loader algorithm
+into SRAM at @code{0x20000000} for fast sector-at-a-time writes.  If
+the working area is unavailable (e.g., a RAM-resident application
+occupies SRAM) the driver falls back to slower word-by-word direct
+register writes. The working area @b{must} be configured at
+@code{0x20000000}; this is the default in @file{target/ti/am13e230x.cfg}.
+
+@b{Erase}: performed directly through the NVMNW flash controller
+registers from the debug probe. The GSC flash semaphore is acquired
+before each erase operation and released on completion.
+
+@b{Note}: the flash controller auto-protects after every flash
+operation. OpenOCD automatically un-protects the required sectors
+before each erase or write and does not expose separate protect
+commands.
+
+@b{Example} --- typical @file{flash bank} declarations (already included
+in @file{target/ti/am13e230x.cfg}):
+
+@example
+flash bank $_FLASHNAME.main    am13 0x00000000 0 0 0 $_TARGETNAME
+flash bank $_FLASHNAME.nonmain am13 0x60100000 0 0 0 $_TARGETNAME
+@end example
+
+@b{To erase and program MAIN flash}:
+
+@example
+halt
+flash erase_sector 0 0 last
+flash write_image firmware.bin 0x0
+reset run
+@end example
+
+@b{To erase and program NONMAIN flash} (BANK1 NM1, user application storage):
+
+@example
+halt
+flash erase_sector 1 3 3
+flash write_image nonmain.bin 0x60101800
+reset run
+@end example
+
+@end deffn
+
 @deffn {Flash Driver} {artery}
 @cindex artery
 This driver supports Artery Technology devices from the following series:
@@ -6804,6 +6979,10 @@ This driver supports Artery Technology devices from the following series:
 @item AT32F435 / AT32F437
 @item AT32WB415
 @end itemize
+
+Some Holtek HT32F4 devices (e.g. the HT32F49153 and HT32F49163) use a
+flash memory controller that is register-compatible with the Artery AT32F423
+and are therefore programmed by this driver.
 
 Devices with dual-bank flash memory are currently not supported.
 Also, access to user data in the user system data (USD) area is not supported.
@@ -7405,8 +7584,7 @@ command completes.
 @end deffn
 
 @deffn {Command} {kinetis nvm_partition}
-For FlexNVM devices only (KxxDX and KxxFX).
-Not supported (yet) on S32K1 devices.
+For FlexNVM devices only (KxxDX, KxxFX and S32K1xx).
 Command shows or sets data flash or EEPROM backup size in kilobytes,
 sets two EEPROM blocks sizes in bytes and enables/disables loading
 of EEPROM contents to FlexRAM during reset.
@@ -7432,6 +7610,14 @@ Set 16 KB EEPROM backup, rest of FlexNVM is a data flash. EEPROM has two blocks
 of 1024 bytes and its contents is not loaded to FlexRAM during reset:
 @example
 kinetis nvm_partition eebkp 16 1024 1024 off
+@end example
+
+S32K1xx devices have a single EEPROM block, so specify the total EEPROM size
+only. Use @command{kinetis mdm mass_erase} to clear an existing partition. Set
+32 KB EEPROM backup (no data flash) with 2 KB EEPROM, loaded to FlexRAM during
+reset:
+@example
+kinetis nvm_partition eebkp 32 2048
 @end example
 @end deffn
 
@@ -7900,6 +8086,19 @@ code.
 
 @end deffn
 
+@deffn {Flash Driver} {nrf54}
+This driver supports the nRF54 microcontroller family from Nordic Semiconductor.
+These devices use a resistive random access memory (RRAM) and no flash memory technology.
+This technology requires no special erase operation, data can be arbitrarily manipulated.
+
+The UICR memory region is currently not supported by the driver.
+
+@example
+flash bank $_FLASHNAME nrf54 0 0x00000000 0 0 $_TARGETNAME
+@end example
+
+@end deffn
+
 @deffn {Flash Driver} {ocl}
 This driver is an implementation of the ``on chip flash loader''
 protocol proposed by Pavel Chromy.
@@ -7911,6 +8110,14 @@ available in @file{contrib/loaders/flash/at91sam7x/}.
 
 @example
 flash bank $_FLASHNAME ocl 0 0 0 0 $_TARGETNAME
+@end example
+@end deffn
+
+@deffn {Flash Driver} {pac55xx}
+Supports the PAC55XX series from Qorvo.
+
+@example
+flash bank $_FLASHNAME pac55xx 0 0 0 0 $_TARGETNAME
 @end example
 @end deffn
 
@@ -9357,12 +9564,12 @@ SPI flash connected to the FPGA to store the bitstream (@xref{jtagspi} for detai
 
 They are referenced by the name which was given when the pld was created or
 the number shown by the @command{pld devices} command.
-New PLDs are defined by @command{pld create pld_name driver_name -chain-position tap_name [driver_options]}.
+New PLDs are defined by @command{pld create pld_name driver_name -tap tap_name [driver_options]}.
 
-@deffn {Config Command} {pld create} pld_name driver_name -chain-position tap_name [driver_options]
+@deffn {Config Command} {pld create} pld_name driver_name -tap tap_name [driver_options]
 Creates a new PLD device, supported by driver @var{driver_name},
 assigning @var{pld_name} for further reference.
-@code{-chain-position} @var{tap_name} names the TAP
+@code{-tap} @var{tap_name} names the TAP
 used to access this target.
 The driver may make use of any @var{driver_options} to configure its behavior.
 @end deffn
@@ -9392,8 +9599,8 @@ loading the bitstream. While required for Series2, Series3, and Series6, it
 breaks bitstream loading on Series7.
 
 @example
-openocd -f board/digilent_zedboard.cfg -c "init" \
-	-c "pld load 0 zedboard_bitstream.bit"
+openocd -f board/digilent/zedboard.cfg -c "init" \
+	-c "pld load zynq_pl.pld zedboard_bitstream.bit"
 @end example
 
 
@@ -9477,7 +9684,7 @@ from a '.sof' file with @verb{|quartus_cpf -c blinker.sof blinker.rbf|}
 
 Creates a new PLD device, an FPGA of the Cyclone III family, using the TAP named @verb{|cycloneiii.tap|}:
 @example
-pld create cycloneiii.pld intel -chain-position cycloneiii.tap -family cycloneiii
+pld create cycloneiii.pld intel -tap cycloneiii.tap -family cycloneiii
 @end example
 
 @deffn {Command} {intel set_bscan} pld_name len
@@ -9587,16 +9794,28 @@ Useful in connection with script files
 (@command{script} command and @command{target_name} configuration).
 @end deffn
 
-@deffn {Command} {shutdown} [@option{error}]
-Close the OpenOCD server, disconnecting all clients (GDB, telnet,
-other). If option @option{error} is used, OpenOCD will return a
-non-zero exit code to the parent process.
+@deffn {Command} {shutdown} [@option{error} | exit_status_code]
+Close the OpenOCD server, disconnecting all clients (GDB, telnet and
+others). Then the OpenOCD process quits.
+
+The optional argument to @command{shutdown} allows to specify a concrete
+exit status for the OpenOCD process. If omitted, exit status zero
+will be used (denoting successful execution).
+
+Command @command{shutdown error} is a synonym for @command{shutdown 1}
+for backward compatibility with older OpenOCD versions.
+
+"Exit status" (also referred to as "exit code" or "exit value") is an integer
+number in the range 0 - 255 which denotes whether a process exited successfully
+or whether an error occurred. Zero exit status means success whereas non-zero
+value denotes an error. The exit status can be obtained and inspected by
+the parent process (for instance via @command{$?} in a shell command line).
 
 If user types CTRL-C or kills OpenOCD, the command @command{shutdown}
-will be automatically executed to cause OpenOCD to exit.
+will also be automatically executed to cause OpenOCD to exit.
 
-It is possible to specify, in the Tcl list @var{pre_shutdown_commands} , a
-set of commands to be automatically executed before @command{shutdown} , e.g.:
+It is possible to specify, in the Tcl list @var{pre_shutdown_commands}, a
+set of commands to be automatically executed before @command{shutdown}, e.g.:
 @example
 lappend pre_shutdown_commands @{echo "Goodbye, my friend ..."@}
 lappend pre_shutdown_commands @{echo "see you soon !"@}
@@ -9649,6 +9868,20 @@ Specify hostname or IPv4 address on which to listen for incoming
 TCP/IP connections. By default, OpenOCD will listen on the loopback
 interface only. If your network environment is safe, @code{bindto
 0.0.0.0} can be used to cover all available interfaces.
+@end deffn
+
+@deffn {Command} {services}
+Return a Tcl list containing information about running services.
+Each list element is a Tcl dict containing all the information of a
+single service.
+@example
+> services
+@{
+    name gdb
+    port 53811
+    target tap.cpu
+@}
+@end example
 @end deffn
 
 @anchor{targetstatehandling}
@@ -9960,22 +10193,6 @@ Dump @var{size} bytes of target memory starting at @var{address} to the
 binary file named @var{filename}.
 @end deffn
 
-@deffn {Command} {fast_load}
-Loads an image stored in memory by @command{fast_load_image} to the
-current target. Must be preceded by fast_load_image.
-@end deffn
-
-@deffn {Command} {fast_load_image} filename [address [@option{bin}|@option{ihex}|@option{elf}|@option{s19} [@option{min_addr} [@option{max_length}]]]]
-Normally you should be using @command{load_image} or GDB load. However, for
-testing purposes or when I/O overhead is significant(OpenOCD running on an embedded
-host), storing the image in memory and uploading the image to the target
-can be a way to upload e.g. multiple debug sessions when the binary does not change.
-Arguments are the same as @command{load_image}, but the image is stored in OpenOCD host
-memory, i.e. does not affect target. This approach is also useful when profiling
-target programming performance as I/O and target programming can easily be profiled
-separately.
-@end deffn
-
 @deffn {Command} {load_image} filename [address [@option{bin}|@option{ihex}|@option{elf}|@option{s19} [@option{min_addr} [@option{max_length}]]]]
 Load image from file @var{filename} to target memory.
 If an @var{address} is specified, it is used as an offset to the file format
@@ -10189,6 +10406,13 @@ Add or replace usage text on the given @var{command_name}.
 Returns current time since the Epoch in ms
 (See: @url{https://en.wikipedia.org/wiki/Epoch_(computing)}).
 Useful to compute delays in Tcl.
+@end deffn
+
+@deffn {Command} {calculate_checksum} address size
+Calculates the checksum of the memory region starting at @var{address} with a
+length of @var{size}.
+
+@xref{target_calculate_checksum,, $target_name calculate_checksum}, for more details.
 @end deffn
 
 @node Architecture and Core Commands
@@ -11750,6 +11974,13 @@ all execution modes.
 @item @code{cget} returns a TCL @code{dict} of execution mode - @code{ebreak}
 action pairs.
 @end itemize
+
+@item @code{-cetrig} @option{off}|@option{on} -- determines how OpenOCD should
+configure the @code{cetrig} in the dcsr register. Defaults to @option{on}.
+
+@itemize
+@item @code{cget} returns the currently configured state for @code{-cetrig}.
+@end itemize
 @end itemize
 
 @subsection RISC-V Debug Configuration Commands
@@ -11840,6 +12071,8 @@ dump_sample_buf}.
 Quickly read count words of the given size from address. This can be useful
 to read out a buffer that's memory-mapped to be accessed through a single
 address, or to sample a changing value in a memory-mapped device.
+
+The address is physical.
 @end deffn
 
 @deffn {Command} {riscv info}
@@ -11859,9 +12092,11 @@ Set the wall-clock timeout (in seconds) for individual commands. The default
 should work fine for all but the slowest targets (eg. simulators).
 @end deffn
 
-@deffn {Command} {riscv set_mem_access} method1 [method2] [method3]
+@deffn {Command} {riscv mem_access} [method1 [method2 [method3]]]
 Specify which RISC-V memory access method(s) shall be used, and in which order
 of priority. At least one method must be specified.
+
+With no parameter, this command displays the configured memory access method(s).
 
 Available methods are:
 @itemize
@@ -11887,6 +12122,7 @@ read the respective entries). This is the default mode.
 (Virtual memory access will fail with an error if the hardware doesn't
 support the necessary functionality.)
 @item @option{off} - Virtual addresses are not translated (identity mapping is assumed).
+An access in this mode behaves exactly like an explicitly physical one.
 @end itemize
 Returns current translation mode if called without arguments.
 @end deffn
@@ -13087,6 +13323,18 @@ If your device/vendor is not supported you have to use the first variant.
 
 @end deffn
 
+@deffn {Command} {ipdbg names}
+List the known IPDBG hubs with their name.
+@end deffn
+
+
+@deffn {Command} {ipdbg services}
+List the active services, as a Tcl list of dicts with keys
+@option{hub}, @option{port}, @option{tool} and @option{state}
+(@option{listening} or @option{connected}).
+@end deffn
+
+
 @deffn {Command} {$hub_name start} @option{-tool @var{number}} @option{-port @var{number}}
 Starts a IPDBG JTAG-Host server. The remaining arguments can be specified in any order.
 
@@ -13137,10 +13385,15 @@ The maximum possible queue size is 1024 which is also the default.
 @end deffn
 
 @example
-bitbang.ibdbghub queuing -size 32
+bitbang.ipdbghub queuing -size 32
 @end example
 Send a maximum of 32 transfers to the queue before executing them.
 
+@deffn {Command} {$hub_name services}
+List the active services, as a Tcl list of dicts with keys
+@option{port}, @option{tool} and @option{state}
+(@option{listening} or @option{connected}).
+@end deffn
 
 @node Utility Commands
 @chapter Utility Commands
@@ -13594,7 +13847,7 @@ By "low-level", we mean commands that a human would typically not
 invoke directly.
 
 @itemize
-@item @b{flash banks} <@var{driver}> <@var{base}> <@var{size}> <@var{chip_width}> <@var{bus_width}> <@var{target}> [@option{driver options} ...]
+@item @b{flash banks}
 
 Return information about the flash banks
 
@@ -13956,7 +14209,7 @@ The ``jtag device'' commands would thus be in the order shown below. Note:
 @item jtag newtap stm32  cpu -irlen ...
 @item jtag newtap stm32  bs  -irlen ...
 @item # Create the debug target and say where it is
-@item target create stm32.cpu -chain-position stm32.cpu ...
+@item target create stm32.cpu -tap stm32.cpu ...
 @end itemize
 
 

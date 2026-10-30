@@ -827,12 +827,6 @@ proc buspirate_port args {
 	eval buspirate port $args
 }
 
-lappend _telnet_autocomplete_skip usb_blaster_device_desc
-proc usb_blaster_device_desc args {
-	echo "DEPRECATED! use 'usb_blaster device_desc' not 'usb_blaster_device_desc'"
-	eval usb_blaster device_desc $args
-}
-
 lappend _telnet_autocomplete_skip usb_blaster_vid_pid
 proc usb_blaster_vid_pid args {
 	echo "DEPRECATED! use 'adapter usb vid_pid' not 'usb_blaster_vid_pid'"
@@ -1237,12 +1231,12 @@ proc "pld device" {driver tap_name {opt 0}} {
 	echo "DEPRECATED! use 'pld create ...', not 'pld device ...'"
 	if {[string is integer -strict $opt]} {
 		if {$opt == 0} {
-			eval pld create [lindex [split $tap_name .] 0].pld $driver -chain-position $tap_name
+			eval pld create [lindex [split $tap_name .] 0].pld $driver -tap $tap_name
 		} else {
-			eval pld create [lindex [split $tap_name .] 0].pld $driver -chain-position $tap_name -no_jstart
+			eval pld create [lindex [split $tap_name .] 0].pld $driver -tap $tap_name -no_jstart
 		}
 	} else {
-		eval pld create [lindex [split $tap_name .] 0].pld $driver -chain-position $tap_name -family $opt
+		eval pld create [lindex [split $tap_name .] 0].pld $driver -tap $tap_name -family $opt
 	}
 }
 

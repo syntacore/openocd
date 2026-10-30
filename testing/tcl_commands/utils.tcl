@@ -167,7 +167,7 @@ namespace eval configure_testing {
 			-work-area-backup 0
 			-endian little
 			-coreid 1
-			-chain-position tap.cpu
+			-tap tap.cpu
 			-dbgbase 0
 			-rtos hwthread
 			-gdb-port 0

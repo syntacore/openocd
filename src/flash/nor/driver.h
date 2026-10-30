@@ -88,6 +88,9 @@ struct flash_driver {
 	 * called, the flash driver should erase the specified sectors
 	 * using whatever means are at its disposal.
 	 *
+	 * If the memory is a non-volatile RAM or other type which
+	 * does not need to be erased before write, set method to NULL.
+	 *
 	 * @param bank The bank of flash to be erased.
 	 * @param first The number of the first sector to erase, typically 0.
 	 * @param last The number of the last sector to erase, typically N-1.
@@ -135,6 +138,9 @@ struct flash_driver {
 	 * "bank->base + offset", while the physical address is
 	 * dependent upon current target MMU mappings.
 	 *
+	 * If the flash does not need device specific read processing,
+	 * set method to NULL and default_flash_read() will be used.
+	 *
 	 * @param bank The bank to read.
 	 * @param buffer The data bytes read.
 	 * @param offset The offset into the chip to read.
@@ -148,6 +154,9 @@ struct flash_driver {
 	 * Verify data in flash.  Note CPU address will be
 	 * "bank->base + offset", while the physical address is
 	 * dependent upon current target MMU mappings.
+	 *
+	 * If the flash does not need device specific verification,
+	 * set method to NULL and default_flash_verify() will be used.
 	 *
 	 * @param bank The bank to verify
 	 * @param buffer The data bytes to verify against.
@@ -172,6 +181,9 @@ struct flash_driver {
 	 * When called, the driver routine must perform the required
 	 * checks and then set the @c flash_sector::is_erased field
 	 * for each of the flash banks's sectors.
+	 *
+	 * If the flash does not need device specific erase_check
+	 * set method to NULL and default_flash_blank_check() will be used.
 	 *
 	 * @param bank The bank to check
 	 * @returns ERROR_OK if successful; otherwise, an error code.
@@ -219,8 +231,12 @@ struct flash_driver {
 	int (*auto_probe)(struct flash_bank *bank);
 
 	/**
-	 * Deallocates private driver structures.
-	 * Use default_flash_free_driver_priv() to simply free(bank->driver_priv)
+	 * Deallocates private driver structures at exit.
+	 *
+	 * If the driver does not use driver_priv and keeps it NULL
+	 * or allocates just one memory block referenced in driver_priv,
+	 * set the method to NULL: default_flash_free_driver_priv() will
+	 * simply free(bank->driver_priv) at exit.
 	 *
 	 * @param bank - the bank being destroyed
 	 */
@@ -240,6 +256,7 @@ const struct flash_driver *flash_driver_find_by_name(const char *name);
 // Keep in alphabetic order this list of drivers
 extern const struct flash_driver aduc702x_flash;
 extern const struct flash_driver aducm360_flash;
+extern const struct flash_driver am13_flash;
 extern const struct flash_driver ambiqmicro_flash;
 extern const struct flash_driver artery_flash;
 extern const struct flash_driver at91sam3_flash;
@@ -275,6 +292,7 @@ extern const struct flash_driver lpc288x_flash;
 extern const struct flash_driver lpc2900_flash;
 extern const struct flash_driver lpcspifi_flash;
 extern const struct flash_driver max32xxx_flash;
+extern const struct flash_driver max32xxx_qspi_flash;
 extern const struct flash_driver mdr_flash;
 extern const struct flash_driver mrvlqspi_flash;
 extern const struct flash_driver msp432_flash;
@@ -283,8 +301,10 @@ extern const struct flash_driver niietcm4_flash;
 extern const struct flash_driver npcx_flash;
 extern const struct flash_driver nrf51_flash;
 extern const struct flash_driver nrf5_flash;
+extern const struct flash_driver nrf54_flash;
 extern const struct flash_driver numicro_flash;
 extern const struct flash_driver ocl_flash;
+extern const struct flash_driver pac55xx_flash;
 extern const struct flash_driver pic32mx_flash;
 extern const struct flash_driver psoc4_flash;
 extern const struct flash_driver psoc5lp_eeprom_flash;

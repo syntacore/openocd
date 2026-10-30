@@ -116,6 +116,17 @@ struct flash_bank {
 	unsigned int num_sectors;
 	/** Array of sectors, allocated and initialized by the flash driver */
 	struct flash_sector *sectors;
+	/**
+	 * Indication of erasure status: 0 = not erased, 1 = erased,
+	 * other = unknown.  Set by @c flash_driver::erase_check only.
+	 *
+	 * Use this only if the flash bank has no sectors.
+	 *
+	 * This information must be considered stale immediately.
+	 * Don't set it in flash_driver::erase or a device mass_erase
+	 * Don't clear it in flash_driver::write
+	 */
+	int is_erased;
 
 	/**
 	 * The number of protection blocks in this bank. This value
@@ -138,10 +149,12 @@ int flash_register_commands(struct command_context *cmd_ctx);
  * The range @a addr to @a addr + @a length - 1 must be strictly
  * sector aligned, unless @a pad is true.  Setting @a pad true extends
  * the range, at beginning and/or end, if needed for sector alignment.
+ * @a skip_banks_without_erase silently skip banks which driver has
+ * no erase method defined.
  * @returns ERROR_OK if successful; otherwise, an error code.
  */
 int flash_erase_address_range(struct target *target,
-		bool pad, target_addr_t addr, uint32_t length);
+		bool pad, target_addr_t addr, uint32_t length, bool skip_banks_without_erase);
 
 int flash_unlock_address_range(struct target *target, target_addr_t addr,
 		uint32_t length);

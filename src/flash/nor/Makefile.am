@@ -11,6 +11,7 @@ noinst_LTLIBRARIES += %D%/libocdflashnor.la
 NOR_DRIVERS = \
 	%D%/aduc702x.c \
 	%D%/aducm360.c \
+	%D%/am13e230x.c \
 	%D%/ambiqmicro.c \
 	%D%/artery.c \
 	%D%/at91sam4.c \
@@ -45,6 +46,7 @@ NOR_DRIVERS = \
 	%D%/lpc2900.c \
 	%D%/lpcspifi.c \
 	%D%/max32xxx.c \
+	%D%/max32xxx_qspi.c \
 	%D%/mdr.c \
 	%D%/msp432.c \
 	%D%/mspm0.c \
@@ -53,8 +55,10 @@ NOR_DRIVERS = \
 	%D%/non_cfi.c \
 	%D%/npcx.c \
 	%D%/nrf5.c \
+	%D%/nrf54.c \
 	%D%/numicro.c \
 	%D%/ocl.c \
+	%D%/pac55xx.c \
 	%D%/pic32mx.c \
 	%D%/psoc4.c \
 	%D%/psoc5lp.c \
@@ -98,6 +102,8 @@ NORHEADERS = \
 	%D%/driver.h \
 	%D%/dw-spi-helper.h \
 	%D%/imp.h \
+	%D%/max32xxx_options.h \
+	%D%/max32xxx_qspi_common_defs.h \
 	%D%/non_cfi.h \
 	%D%/ocl.h \
 	%D%/sfdp.h \

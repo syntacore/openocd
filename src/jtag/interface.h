@@ -74,6 +74,11 @@ enum tap_state tap_get_state(void);
 void tap_set_end_state(enum tap_state new_end_state);
 
 /**
+ * Similar as tap_set_end_state(), checks new_end_state is stable.
+ * @returns ERROR_JTAG_NOT_STABLE_STATE if the state is not stable. */
+int tap_set_end_state_stable(enum tap_state new_end_state);
+
+/**
  * For more information, @see tap_set_end_state
  * @return enum tap_state - The state the TAPs should be in at completion of the current TAP operation.
  */
@@ -142,6 +147,12 @@ bool tap_is_state_stable(enum tap_state astate);
  * @return enum tap_state - the next state a TAP would enter.
  */
 enum tap_state tap_state_transition(enum tap_state current_state, bool tms);
+
+static inline bool tap_is_state_next(enum tap_state from, enum tap_state to)
+{
+	return tap_state_transition(from, false) == to
+		|| tap_state_transition(from, true) == to;
+}
 
 /** Allow switching between old and new TMS tables. @see tap_get_tms_path */
 void tap_use_new_tms_table(bool use_new);
@@ -386,6 +397,7 @@ extern struct adapter_driver dmem_dap_adapter_driver;
 extern struct adapter_driver dummy_adapter_driver;
 extern struct adapter_driver ep93xx_adapter_driver;
 extern struct adapter_driver esp_usb_adapter_driver;
+extern struct adapter_driver eud_adapter_driver;
 extern struct adapter_driver ft232r_adapter_driver;
 extern struct adapter_driver ftdi_adapter_driver;
 extern struct adapter_driver gw16012_adapter_driver;
