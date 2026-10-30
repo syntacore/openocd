@@ -145,6 +145,7 @@ m4_define([USB1_ADAPTERS],
 	[[rlink], [Raisonance RLink JTAG Programmer], [RLINK]],
 	[[usbprog], [USBProg JTAG Programmer], [USBPROG]],
 	[[esp_usb_jtag], [Espressif JTAG Programmer], [ESP_USB_JTAG]],
+	[[eud], [Qualcomm Embedded USB Debugger], [EUD]],
 	[[cmsis_dap_v2], [CMSIS-DAP v2 compliant dongle (USB bulk)], [CMSIS_DAP_USB]]])
 
 # Please keep cmsis_dap_v2 the last in USB1_ADAPTERS
@@ -468,12 +469,25 @@ AS_IF([test "x$build_gw16012" = "xyes"], [
   AC_DEFINE([BUILD_GW16012], [0], [0 if you don't want the Gateworks GW16012 driver.])
 ])
 
+jimtcl_gcc_warnings=""
+
 PKG_CHECK_MODULES([JIMTCL], [jimtcl >= 0.79], [
     have_jimtcl_pkg_config=yes
+
+    # For jimtcl 0.84 repeated declaration bug
+    PKG_CHECK_EXISTS([jimtcl = 0.84], [
+      jimtcl_gcc_warnings="$jimtcl_gcc_warnings -Wno-redundant-decls"
+    ])
   ], [
     have_jimtcl_pkg_config=no
     AC_CHECK_HEADER([jim.h], [], [
       AC_MSG_ERROR([jimtcl is required but not found via pkg-config and system includes])
+    ])
+
+    # For jimtcl 0.84 repeated declaration bug
+    path_jim_h=$(echo '#include <jim.h>' | gcc -E -H - 2>&1 | sed -n '/^\. .*jim\.h/{s/.* //;p}')
+    AS_IF([test $(grep --count "^JIM_EXPORT int Jim_CreateCommand" $path_jim_h) = 2], [
+      jimtcl_gcc_warnings="$jimtcl_gcc_warnings -Wno-redundant-decls"
     ])
 ])
 
@@ -724,6 +738,7 @@ AS_IF([test "x${gcc_wextra}" = "xyes"], [
   GCC_WARNINGS="${GCC_WARNINGS} -Wpointer-arith"
   GCC_WARNINGS="${GCC_WARNINGS} -Wundef"
   GCC_WARNINGS="${GCC_WARNINGS} -Wsign-compare"
+  GCC_WARNINGS="${GCC_WARNINGS} $jimtcl_gcc_warnings"
 ])
 AS_IF([test "x${gcc_werror}" = "xyes"], [
   GCC_WARNINGS="${GCC_WARNINGS} -Werror"

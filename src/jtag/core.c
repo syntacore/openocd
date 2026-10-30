@@ -246,21 +246,7 @@ struct jtag_tap *jtag_tap_by_string(const char *s)
 		t = t->next_tap;
 	}
 
-	/* no tap found by name, so try to parse the name as a number */
-	unsigned int n;
-	if (parse_uint(s, &n) != ERROR_OK)
-		return NULL;
-
-	/* FIXME remove this numeric fallback code late June 2010, along
-	 * with all info in the User's Guide that TAPs have numeric IDs.
-	 * Also update "scan_chain" output to not display the numbers.
-	 */
-	t = jtag_tap_by_position(n);
-	if (t)
-		LOG_WARNING("Specify TAP '%s' by name, not number %u",
-			t->dotted_name, n);
-
-	return t;
+	return NULL;
 }
 
 struct jtag_tap *jtag_tap_next_enabled(struct jtag_tap *p)
@@ -572,8 +558,7 @@ void jtag_add_pathmove(unsigned int num_states, const enum tap_state *path)
 			return;
 		}
 
-		if (tap_state_transition(cur_state, true) != path[i] &&
-				tap_state_transition(cur_state, false) != path[i]) {
+		if (!tap_is_state_next(cur_state, path[i])) {
 			LOG_ERROR("BUG: %s -> %s isn't a valid TAP transition",
 				tap_state_name(cur_state), tap_state_name(path[i]));
 			jtag_set_error(ERROR_JTAG_TRANSITION_INVALID);
@@ -620,8 +605,7 @@ int jtag_add_statemove(enum tap_state goal_state)
 		}
 
 		jtag_add_pathmove(tms_count, moves);
-	} else if (tap_state_transition(cur_state, true)  == goal_state
-			|| tap_state_transition(cur_state, false) == goal_state)
+	} else if (tap_is_state_next(cur_state, goal_state))
 		jtag_add_pathmove(1, &goal_state);
 	else
 		return ERROR_FAIL;

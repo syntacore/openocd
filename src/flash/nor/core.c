@@ -29,13 +29,12 @@ static struct flash_bank *flash_banks;
 int flash_driver_erase(struct flash_bank *bank, unsigned int first,
 		unsigned int last)
 {
-	int retval;
+	if (!bank->driver->erase) {
+		// do not log error here to allow silently skip auto-erase
+		return ERROR_FLASH_OPER_UNSUPPORTED;
+	}
 
-	retval = bank->driver->erase(bank, first, last);
-	if (retval != ERROR_OK)
-		LOG_ERROR("failed erasing sectors %u to %u", first, last);
-
-	return retval;
+	return bank->driver->erase(bank, first, last);
 }
 
 int flash_driver_protect(struct flash_bank *bank, int set, unsigned int first,
@@ -106,7 +105,10 @@ int flash_driver_read(struct flash_bank *bank,
 
 	LOG_DEBUG("call flash_driver_read()");
 
-	retval = bank->driver->read(bank, buffer, offset, count);
+	if (bank->driver->read)
+		retval = bank->driver->read(bank, buffer, offset, count);
+	else
+		retval = default_flash_read(bank, buffer, offset, count);
 	if (retval != ERROR_OK) {
 		LOG_ERROR(
 			"error reading to flash at address " TARGET_ADDR_FMT
@@ -129,8 +131,10 @@ int flash_driver_verify(struct flash_bank *bank,
 {
 	int retval;
 
-	retval = bank->driver->verify ? bank->driver->verify(bank, buffer, offset, count) :
-		default_flash_verify(bank, buffer, offset, count);
+	if (bank->driver->verify)
+		retval = bank->driver->verify(bank, buffer, offset, count);
+	else
+		retval = default_flash_verify(bank, buffer, offset, count);
 	if (retval != ERROR_OK) {
 		LOG_ERROR("verify failed in bank at " TARGET_ADDR_FMT " starting at 0x%8.8" PRIx32,
 			bank->base, offset);
@@ -221,7 +225,7 @@ void flash_free_all_banks(void)
 		if (bank->driver->free_driver_priv)
 			bank->driver->free_driver_priv(bank);
 		else
-			LOG_WARNING("Flash driver of %s does not support free_driver_priv()", bank->name);
+			default_flash_free_driver_priv(bank);
 
 		free(bank->sectors);
 		free(bank->prot_blocks);
@@ -325,12 +329,10 @@ int get_flash_bank_by_addr(struct target *target,
 
 static int default_flash_mem_blank_check(struct flash_bank *bank)
 {
-	struct target *target = bank->target;
 	const int buffer_size = 1024;
-	uint32_t n_bytes;
-	int retval = ERROR_OK;
+	struct target *target = bank->target;
 
-	if (bank->target->state != TARGET_HALTED) {
+	if (target->state != TARGET_HALTED) {
 		LOG_ERROR("Target not halted");
 		return ERROR_TARGET_NOT_HALTED;
 	}
@@ -342,36 +344,106 @@ static int default_flash_mem_blank_check(struct flash_bank *bank)
 	}
 
 	for (unsigned int i = 0; i < bank->num_sectors; i++) {
-		uint32_t j;
 		bank->sectors[i].is_erased = 1;
 
-		for (j = 0; j < bank->sectors[i].size; j += buffer_size) {
+		for (uint32_t j = 0; j < bank->sectors[i].size; j += buffer_size) {
 			uint32_t chunk;
 			chunk = buffer_size;
 			if (chunk > (bank->sectors[i].size - j))
 				chunk = (bank->sectors[i].size - j);
 
-			retval = target_read_memory(target,
-					bank->base + bank->sectors[i].offset + j,
-					4,
-					chunk/4,
-					buffer);
-			if (retval != ERROR_OK)
-				goto done;
+			int retval = target_read_buffer(target,
+				bank->base + bank->sectors[i].offset + j,
+				chunk, buffer);
 
-			for (n_bytes = 0; n_bytes < chunk; n_bytes++) {
+			/* A sector that cannot be read cannot be classified.
+			 * Mark it 'unknown' and continue with the next sector
+			 * rather than failing the whole check.
+			 */
+			if (retval != ERROR_OK) {
+				LOG_WARNING("Failed to check erase state on sector %u, "
+					"continuing on next sector", i);
+				bank->sectors[i].is_erased = -1;
+				break;
+			}
+
+			for (uint32_t n_bytes = 0; n_bytes < chunk; n_bytes++) {
 				if (buffer[n_bytes] != bank->erased_value) {
 					bank->sectors[i].is_erased = 0;
 					break;
 				}
 			}
+
+			if (bank->sectors[i].is_erased == 0)
+				break;
 		}
 	}
 
-done:
 	free(buffer);
 
-	return retval;
+	return ERROR_OK;
+}
+
+static int flash_blank_check_no_sectors_fast(struct flash_bank *bank)
+{
+	struct target_memory_check_block check_block;
+
+	check_block.address = bank->base;
+	check_block.size = bank->size;
+	// Erase state unknown.
+	check_block.result = UINT32_MAX;
+
+	unsigned int checked;
+	int retval = target_blank_check_memory(bank->target, &check_block, 1,
+		bank->erased_value, &checked);
+
+	if (retval != ERROR_OK)
+		return retval;
+
+	bank->is_erased = check_block.result;
+
+	return ERROR_OK;
+}
+
+static int flash_blank_check_no_sectors(struct flash_bank *bank)
+{
+	struct target *target = bank->target;
+	const uint32_t buffer_size = 1024;
+	uint8_t buffer[buffer_size];
+
+	if (bank->target->state != TARGET_HALTED) {
+		LOG_ERROR("Target not halted");
+		return ERROR_TARGET_NOT_HALTED;
+	}
+
+	int retval = flash_blank_check_no_sectors_fast(bank);
+	if (retval == ERROR_OK)
+		return retval;
+
+	LOG_WARNING("Fast erase check failed, running slow fallback");
+
+	bank->is_erased = -1;
+
+	for (uint32_t offset = 0; offset < bank->size; offset += buffer_size) {
+		uint32_t chunk_size = MIN(buffer_size, bank->size - offset);
+
+		retval = target_read_buffer(target, bank->base + offset,
+			chunk_size, buffer);
+
+		if (retval != ERROR_OK)
+			return retval;
+
+		for (uint32_t i = 0; i < chunk_size; i++) {
+			if (buffer[i] != bank->erased_value) {
+				bank->is_erased = 0;
+				return ERROR_OK;
+			}
+		}
+	}
+
+	bank->is_erased = 1;
+
+	return ERROR_OK;
 }
 
 int default_flash_blank_check(struct flash_bank *bank)
@@ -383,6 +455,9 @@ int default_flash_blank_check(struct flash_bank *bank)
 		LOG_ERROR("Target not halted");
 		return ERROR_TARGET_NOT_HALTED;
 	}
+
+	if (bank->num_sectors == 0)
+		return flash_blank_check_no_sectors(bank);
 
 	struct target_memory_check_block *block_array;
 	block_array = malloc(bank->num_sectors * sizeof(struct target_memory_check_block));
@@ -463,19 +538,22 @@ static int flash_iterate_address_range_inner(struct target *target,
 	if (retval != ERROR_OK)
 		return retval;
 
-	if (c->size == 0 || c->num_sectors == 0) {
+	if (c->size == 0) {
 		LOG_ERROR("Bank is invalid");
 		return ERROR_FLASH_BANK_INVALID;
 	}
 
-	if (length == 0) {
-		/* special case, erase whole bank when length is zero */
+	if (length == 0 || c->sectors == 0) {
+		/*
+		 * Special case, erase whole bank when length is zero or the
+		 * bank has no sectors.
+		 */
 		if (addr != c->base) {
 			LOG_ERROR("Whole bank access must start at beginning of bank.");
 			return ERROR_FLASH_DST_BREAKS_ALIGNMENT;
 		}
 
-		return callback(c, 0, c->num_sectors - 1);
+		return callback(c, 0, (c->num_sectors == 0) ? 0 : c->num_sectors - 1);
 	}
 
 	/* check whether it all fits in this bank */
@@ -577,7 +655,7 @@ static int flash_iterate_address_range_inner(struct target *target,
  */
 static int flash_iterate_address_range(struct target *target,
 	char *pad_reason, target_addr_t addr, uint32_t length,
-	bool iterate_protect_blocks,
+	bool iterate_protect_blocks, bool skip_banks_without_erase,
 	int (*callback)(struct flash_bank *bank, unsigned int first,
 		unsigned int last))
 {
@@ -596,12 +674,17 @@ static int flash_iterate_address_range(struct target *target,
 			LOG_DEBUG("iterating over more than one flash bank.");
 			cur_length = c->base + c->size - addr;
 		}
-		retval = flash_iterate_address_range_inner(target,
-				pad_reason, addr, cur_length,
-				iterate_protect_blocks,
-				callback);
-		if (retval != ERROR_OK)
-			break;
+		if (skip_banks_without_erase && !c->driver->erase) {
+			LOG_DEBUG("bank %s does not support erase, skipped",
+					  c->name);
+		} else {
+			retval = flash_iterate_address_range_inner(target,
+					pad_reason, addr, cur_length,
+					iterate_protect_blocks,
+					callback);
+			if (retval != ERROR_OK)
+				break;
+		}
 
 		length -= cur_length;
 		addr += cur_length;
@@ -611,10 +694,11 @@ static int flash_iterate_address_range(struct target *target,
 }
 
 int flash_erase_address_range(struct target *target,
-	bool pad, target_addr_t addr, uint32_t length)
+	bool pad, target_addr_t addr, uint32_t length, bool skip_banks_without_erase)
 {
 	return flash_iterate_address_range(target, pad ? "erase" : NULL,
-		addr, length, false, &flash_driver_erase);
+							addr, length, false /* iterate_protect_blocks */,
+							skip_banks_without_erase,  &flash_driver_erase);
 }
 
 static int flash_driver_unprotect(struct flash_bank *bank, unsigned int first,
@@ -631,7 +715,9 @@ int flash_unlock_address_range(struct target *target, target_addr_t addr,
 	 * and doesn't restore it.
 	 */
 	return flash_iterate_address_range(target, "unprotect",
-		addr, length, true, &flash_driver_unprotect);
+							addr, length, true /* iterate_protect_blocks */,
+							false /* skip_banks_without_erase */,
+							&flash_driver_unprotect);
 }
 
 static int compare_section(const void *a, const void *b)
@@ -963,7 +1049,9 @@ int flash_write_unlock_verify(struct target *target, struct image *image,
 			if (erase) {
 				/* calculate and erase sectors */
 				retval = flash_erase_address_range(target,
-						true, run_address, run_size);
+											true /* pad */,
+											run_address, run_size,
+											true /* skip_banks_without_erase */);
 			}
 		}
 

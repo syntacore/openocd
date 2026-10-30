@@ -224,7 +224,7 @@ static int str9xpec_build_block_list(struct flash_bank *bank)
 		break;
 	default:
 		LOG_ERROR("BUG: unknown bank->size encountered");
-		exit(-1);
+		return ERROR_FAIL;
 	}
 
 	num_sectors = b0_sectors + b1_sectors;
@@ -282,7 +282,12 @@ FLASH_BANK_COMMAND_HANDLER(str9xpec_flash_bank_command)
 	str9xpec_info->tap = jtag_tap_by_position(jtag_info->tap->abs_chain_position - 1);
 	str9xpec_info->isc_enable = 0;
 
-	str9xpec_build_block_list(bank);
+	int retval = str9xpec_build_block_list(bank);
+	if (retval != ERROR_OK) {
+		free(bank->driver_priv);
+		bank->driver_priv = NULL;
+		return retval;
+	}
 
 	/* clear option byte register */
 	buf_set_u32(str9xpec_info->options, 0, 64, 0);

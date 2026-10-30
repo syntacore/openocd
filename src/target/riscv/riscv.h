@@ -17,9 +17,7 @@ struct riscv_program;
 
 #define RISCV_COMMON_MAGIC	0x52495356U
 
-#define RISCV_MAX_HARTS  ((int)BIT(20))
 #define RISCV_MAX_TRIGGERS 32
-#define RISCV_MAX_HWBPS 16
 #define RISCV_MAX_DMS 100
 
 #define DEFAULT_COMMAND_TIMEOUT_SEC 5
@@ -75,6 +73,7 @@ enum riscv_halt_reason {
 	RISCV_HALT_TRIGGER,
 	RISCV_HALT_UNKNOWN,
 	RISCV_HALT_GROUP,
+	RISCV_HALT_CRITICAL_ERROR,
 	RISCV_HALT_ERROR
 };
 
@@ -133,8 +132,18 @@ struct reg_name_table {
 	char **reg_names;
 };
 
+enum riscv_priv_mode {
+	RISCV_MODE_M,
+	RISCV_MODE_S,
+	RISCV_MODE_U,
+	RISCV_MODE_VS,
+	RISCV_MODE_VU,
+	N_RISCV_MODE
+};
+
 struct riscv_mem_access_args {
 	target_addr_t address;
+	enum riscv_priv_mode mode;
 
 	const uint8_t *write_buffer;
 	uint8_t *read_buffer;
@@ -216,7 +225,7 @@ struct riscv_info {
 	 * >= 0: unique_id of the breakpoint/watchpoint that is using it.
 	 * Note that in RTOS mode the triggers are the same across all harts the
 	 * target controls, while otherwise only a single hart is controlled. */
-	int64_t trigger_unique_id[RISCV_MAX_HWBPS];
+	int64_t trigger_unique_id[RISCV_MAX_TRIGGERS];
 
 	/* The unique id of the trigger that caused the most recent halt. If the
 	 * most recent halt was not caused by a trigger, then this is -1. */
@@ -367,17 +376,26 @@ struct riscv_info {
 	bool autofence;
 };
 
-enum riscv_priv_mode {
-	RISCV_MODE_M,
-	RISCV_MODE_S,
-	RISCV_MODE_U,
-	RISCV_MODE_VS,
-	RISCV_MODE_VU,
-	N_RISCV_MODE
-};
+static inline riscv_reg_t riscv_priv_mode_to_prv(enum riscv_priv_mode mode)
+{
+	switch (mode) {
+	case RISCV_MODE_M:
+		return PRV_M;
+	case RISCV_MODE_S:
+	case RISCV_MODE_VS:
+		return PRV_S;
+	case RISCV_MODE_U:
+	case RISCV_MODE_VU:
+		return PRV_U;
+	default:
+		assert(false);
+		return PRV_M;
+	}
+}
 
 struct riscv_private_config {
 	bool dcsr_ebreak_fields[N_RISCV_MODE];
+	bool dcsr_cetrig;
 };
 
 static inline struct riscv_private_config
@@ -408,9 +426,6 @@ typedef struct {
 	unsigned int pa_ppn_shift[PG_MAX_LEVEL];
 	unsigned int pa_ppn_mask[PG_MAX_LEVEL];
 } virt2phys_info_t;
-
-bool riscv_virt2phys_mode_is_hw(const struct target *target);
-bool riscv_virt2phys_mode_is_sw(const struct target *target);
 
 /* Wall-clock timeout for a command/access. Settable via RISC-V Target commands.*/
 int riscv_get_command_timeout_sec(void);

@@ -5,6 +5,12 @@
 
 #include <stdint.h>
 
+/* Define a short timeout in milliseconds that the driver uses to flush the
+ * pipeline. The driver expects this timeout to occur, so the backend may want
+ * to handle it differently than a normal (unexpected) timeout.
+ */
+#define CMSIS_DAP_TIMEOUT_SHORT_MS      10
+
 struct cmsis_dap_backend;
 struct cmsis_dap_backend_data;
 
@@ -33,6 +39,7 @@ struct cmsis_dap {
 	uint8_t *packet_buffer;
 	uint8_t *command;
 	uint8_t *response;
+	unsigned int response_size;
 
 	/* DP/AP register r/w operation counters used for checking the packet size
 	 * that would result from the queue run */

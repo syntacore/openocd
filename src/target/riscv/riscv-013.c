@@ -5,13 +5,13 @@
  * latest draft.
  */
 
-#include <assert.h>
-#include <stdint.h>
-#include <stdlib.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 #include "target/target.h"
 #include "target/algorithm.h"
@@ -139,11 +139,6 @@ typedef struct {
 	bool abstract_cmd_maybe_busy;
 } dm013_info_t;
 
-typedef struct {
-	struct list_head list;
-	struct target *target;
-} target_list_t;
-
 struct ac_cache {
 	uint32_t *commands;
 	size_t size;
@@ -252,9 +247,9 @@ typedef struct {
 	/* This target was selected using hasel. */
 	bool selected;
 
-	/* When false, we need to set dcsr.ebreak*, halting the target if that's
-	 * necessary. */
-	bool dcsr_ebreak_is_set;
+	/* When false, we need to configure certain bits in the dcsr register.
+	 * To do that, we may momentarily halt the target, if necessary. */
+	bool dcsr_register_is_set;
 
 	/* This hart was placed into a halt group in examine(). */
 	bool haltgroup_supported;
@@ -311,8 +306,8 @@ static dm013_info_t *get_dm(struct target *target)
 	}
 
 	info->dm = dm;
-	target_list_t *target_entry;
-	list_for_each_entry(target_entry, &dm->target_list, list) {
+	struct target_list *target_entry;
+	list_for_each_entry(target_entry, &dm->target_list, lh) {
 		if (target_entry->target == target)
 			return dm;
 	}
@@ -322,7 +317,7 @@ static dm013_info_t *get_dm(struct target *target)
 		return NULL;
 	}
 	target_entry->target = target;
-	list_add(&target_entry->list, &dm->target_list);
+	list_add(&target_entry->lh, &dm->target_list);
 
 	return dm;
 }
@@ -334,10 +329,10 @@ static void riscv013_dm_free(struct target *target)
 	if (!dm)
 		return;
 
-	target_list_t *target_entry;
-	list_for_each_entry(target_entry, &dm->target_list, list) {
+	struct target_list *target_entry;
+	list_for_each_entry(target_entry, &dm->target_list, lh) {
 		if (target_entry->target == target) {
-			list_del(&target_entry->list);
+			list_del(&target_entry->lh);
 			free(target_entry);
 			break;
 		}
@@ -353,7 +348,9 @@ static void riscv013_dm_free(struct target *target)
 static struct riscv_debug_reg_ctx get_riscv_debug_reg_ctx(const struct target *target)
 {
 	if (!target_was_examined(target)) {
-		const struct riscv_debug_reg_ctx default_context = {0};
+		const struct riscv_debug_reg_ctx default_context = {
+			.XLEN = { 0 }
+		};
 		return default_context;
 	}
 
@@ -1310,6 +1307,7 @@ static int scratch_read64(struct target *target, scratch_mem_t *scratch,
 			uint8_t buffer[8] = {0};
 			const struct riscv_mem_access_args args = {
 				.address = scratch->debug_address,
+				.mode = RISCV_MODE_M,
 				.read_buffer = buffer,
 				.size = 4,
 				.count = 2,
@@ -1352,6 +1350,7 @@ static int scratch_write64(struct target *target, scratch_mem_t *scratch,
 			};
 			const struct riscv_mem_access_args args = {
 				.address = scratch->debug_address,
+				.mode = RISCV_MODE_M,
 				.write_buffer = buffer,
 				.size = 4,
 				.count = 2,
@@ -1730,9 +1729,9 @@ static int wait_for_authbusy(struct target *target, uint32_t *dmstatus)
 	return ERROR_OK;
 }
 
-static int set_dcsr_ebreak(struct target *target, bool step)
+static int set_dcsr_config(struct target *target, bool step)
 {
-	LOG_TARGET_DEBUG(target, "Set dcsr.ebreak*");
+	LOG_TARGET_DEBUG(target, "Set dcsr config");
 
 	if (dm013_select_target(target) != ERROR_OK)
 		return ERROR_FAIL;
@@ -1750,18 +1749,20 @@ static int set_dcsr_ebreak(struct target *target, bool step)
 	dcsr = set_field(dcsr, CSR_DCSR_EBREAKU, config->dcsr_ebreak_fields[RISCV_MODE_U]);
 	dcsr = set_field(dcsr, CSR_DCSR_EBREAKVS, config->dcsr_ebreak_fields[RISCV_MODE_VS]);
 	dcsr = set_field(dcsr, CSR_DCSR_EBREAKVU, config->dcsr_ebreak_fields[RISCV_MODE_VU]);
+	dcsr = set_field(dcsr, CSR_DCSR_CETRIG, config->dcsr_cetrig);
 	if (dcsr != original_dcsr &&
 			riscv_reg_set(target, GDB_REGNO_DCSR, dcsr) != ERROR_OK)
 		return ERROR_FAIL;
-	info->dcsr_ebreak_is_set = true;
+	// TODO: Read back the DCSR and check if these WARL bits are set as the user intended.
+	info->dcsr_register_is_set = true;
 	return ERROR_OK;
 }
 
-static int halt_set_dcsr_ebreak(struct target *target)
+static int halt_set_dcsr_config(struct target *target)
 {
 	RISCV_INFO(r);
 	RISCV013_INFO(info);
-	LOG_TARGET_DEBUG(target, "Halt to set DCSR.ebreak*");
+	LOG_TARGET_DEBUG(target, "Halt to set dcsr config");
 
 	/* Remove this hart from the halt group.  This won't work on all targets
 	 * because the debug spec allows halt groups to be hard-coded, but I
@@ -1799,7 +1800,7 @@ static int halt_set_dcsr_ebreak(struct target *target)
 
 	r->prepped = true;
 	if (riscv013_halt_go(target) != ERROR_OK ||
-			set_dcsr_ebreak(target, false) != ERROR_OK ||
+			set_dcsr_config(target, false) != ERROR_OK ||
 			riscv013_step_or_resume_current_hart(target, false) != ERROR_OK) {
 		result = ERROR_FAIL;
 	} else {
@@ -1810,11 +1811,11 @@ static int halt_set_dcsr_ebreak(struct target *target)
 	/* Add it back to the halt group. */
 	if (info->haltgroup_supported) {
 		bool supported;
-		if (set_group(target, &supported, target->smp, HALT_GROUP) != ERROR_OK)
+		if (set_group(target, &supported, target->smp_id, HALT_GROUP) != ERROR_OK)
 			return ERROR_FAIL;
 		if (!supported)
 			LOG_TARGET_ERROR(target, "Couldn't place hart back in halt group %d. "
-						 "Some harts may be unexpectedly halted.", target->smp);
+						 "Some harts may be unexpectedly halted.", target->smp_id);
 	}
 
 	return result;
@@ -1979,9 +1980,8 @@ static int examine_dm(struct target *target)
 		get_field(dmcontrol, DM_DMCONTROL_HARTSELLO);
 
 	/* Before doing anything else we must first enumerate the harts. */
-	const int max_hart_count = MIN(RISCV_MAX_HARTS, hartsel + 1);
 	if (dm->hart_count < 0) {
-		for (int i = 0; i < max_hart_count; ++i) {
+		for (uint32_t i = 0; i <= hartsel; ++i) {
 			/* TODO: This is extremely similar to
 			 * riscv013_get_hart_state().
 			 * It would be best to reuse the code.
@@ -2094,6 +2094,25 @@ static int examine(struct target *target)
 	if (result != ERROR_OK)
 		return result;
 
+	dm013_info_t *dm = get_dm(target);
+	assert(dm);
+	if (target->coreid >= dm->hart_count) {
+		LOG_TARGET_ERROR(target, "Hart index %d is too large. The maximum"
+			" index for this Debug Module is %d",
+			target->coreid, dm->hart_count - 1);
+		return ERROR_FAIL;
+	}
+
+	struct target_list *entry;
+	list_for_each_entry(entry, &dm->target_list, lh) {
+		struct target *t = entry->target;
+		if (target != t && target->coreid == t->coreid) {
+			LOG_TARGET_ERROR(target, "Hart index %d is already used by target '%s' in DM list",
+					target->coreid, target_name(t));
+			return ERROR_FAIL;
+		}
+	}
+
 	result = dm013_select_target(target);
 	if (result != ERROR_OK)
 		return result;
@@ -2175,7 +2194,7 @@ static int examine(struct target *target)
 	if (result != ERROR_OK)
 		return result;
 
-	if (set_dcsr_ebreak(target, false) != ERROR_OK)
+	if (set_dcsr_config(target, false) != ERROR_OK)
 		return ERROR_FAIL;
 
 	if (state_at_examine_start == RISCV_STATE_RUNNING) {
@@ -2188,14 +2207,14 @@ static int examine(struct target *target)
 	}
 
 	if (target->smp) {
-		if (set_group(target, &info->haltgroup_supported, target->smp, HALT_GROUP) != ERROR_OK)
+		if (set_group(target, &info->haltgroup_supported, target->smp_id, HALT_GROUP) != ERROR_OK)
 			return ERROR_FAIL;
 		if (info->haltgroup_supported)
 			LOG_TARGET_INFO(target, "Core %d made part of halt group %d.", info->index,
-					target->smp);
+					target->smp_id);
 		else
 			LOG_TARGET_INFO(target, "Core %d could not be made part of halt group %d.",
-					info->index, target->smp);
+					info->index, target->smp_id);
 	}
 
 	/* Some regression suites rely on seeing 'Examined RISC-V core' to know
@@ -2242,8 +2261,8 @@ static int riscv013_authdata_write(struct target *target, uint32_t value, unsign
 		dm013_info_t *dm = get_dm(target);
 		if (!dm)
 			return ERROR_FAIL;
-		target_list_t *entry;
-		list_for_each_entry(entry, &dm->target_list, list) {
+		struct target_list *entry;
+		list_for_each_entry(entry, &dm->target_list, lh) {
 			if (target_examine_one(entry->target) != ERROR_OK)
 				result = ERROR_FAIL;
 		}
@@ -2756,8 +2775,8 @@ static int sample_memory_bus_v1(struct target *target,
 		const uint32_t sbcs_read_op = riscv_batch_get_dmi_read_op(batch, sbcs_read_index);
 		if (sbcs_read_op == DTM_DMI_OP_BUSY) {
 			result = increase_dmi_busy_delay(target);
+			riscv_batch_free(batch);
 			if (result != ERROR_OK) {
-				riscv_batch_free(batch);
 				return result;
 			}
 			continue;
@@ -2827,7 +2846,7 @@ static int riscv013_get_hart_state(struct target *target, enum riscv_hart_state 
 		return ERROR_FAIL;
 	if (get_field(dmstatus, DM_DMSTATUS_ANYHAVERESET)) {
 		LOG_TARGET_INFO(target, "Hart unexpectedly reset!");
-		info->dcsr_ebreak_is_set = false;
+		info->dcsr_register_is_set = false;
 		/* TODO: Can we make this more obvious to eg. a gdb user? */
 		uint32_t dmcontrol = DM_DMCONTROL_DMACTIVE |
 			DM_DMCONTROL_ACKHAVERESET;
@@ -2878,17 +2897,17 @@ static int handle_became_unavailable(struct target *target,
 
 	riscv_reg_cache_invalidate_all(target);
 
-	info->dcsr_ebreak_is_set = false;
+	info->dcsr_register_is_set = false;
 	return ERROR_OK;
 }
 
 static int tick(struct target *target)
 {
 	RISCV013_INFO(info);
-	if (!info->dcsr_ebreak_is_set &&
+	if (!info->dcsr_register_is_set &&
 			target->state == TARGET_RUNNING &&
 			target_was_examined(target))
-		return halt_set_dcsr_ebreak(target);
+		return halt_set_dcsr_config(target);
 	return ERROR_OK;
 }
 
@@ -2987,13 +3006,13 @@ static int assert_reset(struct target *target)
 	return riscv013_invalidate_cached_progbuf(target);
 }
 
-static bool dcsr_ebreak_config_equals_reset_value(const struct target *target)
+static bool dcsr_config_equals_reset_value(const struct target *target)
 {
 	const struct riscv_private_config * const config = riscv_private_config(target);
 	for (int i = 0; i < N_RISCV_MODE; ++i)
 		if (config->dcsr_ebreak_fields[i])
 			return false;
-	return true;
+	return !config->dcsr_cetrig;
 }
 
 static int deassert_reset(struct target *target)
@@ -3063,7 +3082,7 @@ static int deassert_reset(struct target *target)
 		target->state = TARGET_RUNNING;
 		target->debug_reason = DBG_REASON_NOTHALTED;
 	}
-	info->dcsr_ebreak_is_set = dcsr_ebreak_config_equals_reset_value(target);
+	info->dcsr_register_is_set = dcsr_config_equals_reset_value(target);
 	return ERROR_OK;
 }
 
@@ -3234,65 +3253,94 @@ static int read_sbcs_nonbusy(struct target *target, uint32_t *sbcs)
 	}
 }
 
-/* TODO: return struct mem_access_result */
-static int modify_privilege_for_virt2phys_mode(struct target *target, riscv_reg_t *mstatus, riscv_reg_t *mstatus_old,
-		riscv_reg_t *dcsr, riscv_reg_t *dcsr_old)
+static int set_mpp_mpv(struct target *target, riscv_reg_t *mstatus,
+		riscv_reg_t *mstatus_old, riscv_reg_t *mstatush,
+		riscv_reg_t *mstatush_old, enum riscv_priv_mode mode)
 {
 	assert(mstatus);
 	assert(mstatus_old);
-	assert(dcsr);
-	assert(dcsr_old);
-	if (!riscv_virt2phys_mode_is_hw(target))
-		return ERROR_OK;
+	assert(mstatush);
+	assert(mstatush_old);
 
-	/* Read and save DCSR */
-	if (riscv_reg_get(target, dcsr, GDB_REGNO_DCSR) != ERROR_OK)
-		return ERROR_FAIL;
-	*dcsr_old = *dcsr;
-
-	/* Read and save MSTATUS */
 	if (riscv_reg_get(target, mstatus, GDB_REGNO_MSTATUS) != ERROR_OK)
 		return ERROR_FAIL;
 	*mstatus_old = *mstatus;
 
-	/* If we come from m-mode with mprv set, we want to keep mpp */
-	if (get_field(*dcsr, CSR_DCSR_PRV) == PRV_M)
-		return ERROR_OK;
-
-	/* mstatus.mpp <- dcsr.prv */
-	*mstatus = set_field(*mstatus, MSTATUS_MPP, get_field(*dcsr, CSR_DCSR_PRV));
-
-	/* mstatus.mprv <- 1 */
 	*mstatus = set_field(*mstatus, MSTATUS_MPRV, 1);
+	*mstatus = set_field(*mstatus, MSTATUS_MPP, riscv_priv_mode_to_prv(mode));
 
-	/* Write MSTATUS */
+	/* The caller refuses a guest access, so MPV is cleared. */
+	if (riscv_supports_extension(target, 'H')) {
+		if (riscv_xlen(target) == 32) {
+			if (riscv_reg_get(target, mstatush, GDB_REGNO_MSTATUSH) != ERROR_OK)
+				return ERROR_FAIL;
+			*mstatush_old = *mstatush;
+			*mstatush = set_field(*mstatush, MSTATUSH_MPV, 0);
+		} else {
+			*mstatus = set_field(*mstatus, MSTATUS_MPV, 0);
+		}
+	}
+
 	if (*mstatus != *mstatus_old &&
 			riscv_reg_set(target, GDB_REGNO_MSTATUS, *mstatus) != ERROR_OK)
 		return ERROR_FAIL;
 
-	/* dcsr.mprven <- 1 */
-	*dcsr = set_field(*dcsr, CSR_DCSR_MPRVEN, CSR_DCSR_MPRVEN_ENABLED);
-
-	/* Write DCSR */
-	if (*dcsr != *dcsr_old &&
-			riscv_reg_set(target, GDB_REGNO_DCSR, *dcsr) != ERROR_OK)
+	if (*mstatush != *mstatush_old &&
+			riscv_reg_set(target, GDB_REGNO_MSTATUSH, *mstatush) != ERROR_OK)
 		return ERROR_FAIL;
 
 	return ERROR_OK;
 }
 
-static int restore_privilege_from_virt2phys_mode(struct target *target, riscv_reg_t mstatus, riscv_reg_t mstatus_old,
-		riscv_reg_t dcsr, riscv_reg_t dcsr_old)
+static int restore_mpp_mpv(struct target *target, riscv_reg_t mstatus,
+		riscv_reg_t mstatus_old, riscv_reg_t mstatush, riscv_reg_t mstatush_old)
 {
-	if (!riscv_virt2phys_mode_is_hw(target))
-		return ERROR_OK;
-
-	/* Restore MSTATUS */
 	if (mstatus != mstatus_old &&
 			riscv_reg_set(target, GDB_REGNO_MSTATUS, mstatus_old) != ERROR_OK)
 		return ERROR_FAIL;
 
-	/* Restore DCSR */
+	if (mstatush != mstatush_old &&
+			riscv_reg_set(target, GDB_REGNO_MSTATUSH, mstatush_old) != ERROR_OK)
+		return ERROR_FAIL;
+
+	return ERROR_OK;
+}
+
+/* TODO: return struct mem_access_result */
+static int modify_privilege_progbuf(struct target *target, riscv_reg_t *mstatus,
+		riscv_reg_t *mstatus_old, riscv_reg_t *mstatush, riscv_reg_t *mstatush_old,
+		riscv_reg_t *dcsr, riscv_reg_t *dcsr_old, enum riscv_priv_mode mode)
+{
+	assert(mstatus);
+	assert(mstatus_old);
+	assert(mstatush);
+	assert(mstatush_old);
+	assert(dcsr);
+	assert(dcsr_old);
+
+	if (riscv_reg_get(target, dcsr, GDB_REGNO_DCSR) != ERROR_OK)
+		return ERROR_FAIL;
+	*dcsr_old = *dcsr;
+
+	*dcsr = set_field(*dcsr, CSR_DCSR_MPRVEN, mode == RISCV_MODE_M ?
+			CSR_DCSR_MPRVEN_DISABLED : CSR_DCSR_MPRVEN_ENABLED);
+
+	if (*dcsr != *dcsr_old &&
+			riscv_reg_set(target, GDB_REGNO_DCSR, *dcsr) != ERROR_OK)
+		return ERROR_FAIL;
+
+	if (mode == RISCV_MODE_M)
+		return ERROR_OK;
+
+	return set_mpp_mpv(target, mstatus, mstatus_old, mstatush, mstatush_old, mode);
+}
+
+static int restore_privilege_progbuf(struct target *target, riscv_reg_t mstatus, riscv_reg_t mstatus_old,
+		riscv_reg_t mstatush, riscv_reg_t mstatush_old, riscv_reg_t dcsr, riscv_reg_t dcsr_old)
+{
+	if (restore_mpp_mpv(target, mstatus, mstatus_old, mstatush, mstatush_old) != ERROR_OK)
+		return ERROR_FAIL;
+
 	if (dcsr != dcsr_old &&
 			riscv_reg_set(target, GDB_REGNO_DCSR, dcsr_old) != ERROR_OK)
 		return ERROR_FAIL;
@@ -3608,6 +3656,8 @@ enum mem_access_result_type {
 			SKIPPED, "skipped (abstract command argument write failed)") \
 	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_PRIV_MOD_FAILED, \
 			SKIPPED, "skipped (privilege modification failed)") \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_NO_HW_TRANSLATION, \
+			SKIPPED, "skipped (backend cannot translate a virtual address)") \
 	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_FAILED, FAILED, "failed") \
 	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_FAILED_DM_ACCESS_FAILED, \
 			FAILED, "failed (DM register access failed)") \
@@ -3759,6 +3809,12 @@ mem_should_skip_sysbus(struct target *target, const struct riscv_mem_access_args
 	const bool is_read = riscv_mem_access_is_read(args);
 	const char *const access_type = is_read ? "read" : "write";
 
+	if (args.mode != RISCV_MODE_M) {
+		LOG_TARGET_DEBUG(target, "Skipping mem %s via system bus - "
+				"no hardware address translation for a virtual address", access_type);
+		return mem_access_result(MEM_ACCESS_SKIPPED_NO_HW_TRANSLATION);
+	}
+
 	if (!sba_supports_access(target, args.size)) {
 		LOG_TARGET_DEBUG(target, "Skipping mem %s via system bus - "
 				"unsupported size.", access_type);
@@ -3790,6 +3846,12 @@ mem_should_skip_abstract(struct target *target, const struct riscv_mem_access_ar
 
 	const bool is_read = riscv_mem_access_is_read(args);
 	const char *const access_type = is_read ? "read" : "write";
+	if (args.mode != RISCV_MODE_M) {
+		/* Temporary, until aamvirtual support lands. */
+		LOG_TARGET_DEBUG(target, "Skipping mem %s via abstract access - "
+				"virtual access (aamvirtual) not implemented yet", access_type);
+		return mem_access_result(MEM_ACCESS_SKIPPED_NO_HW_TRANSLATION);
+	}
 	if (args.size > 8) {
 		/* TODO: Add 128b support if it's ever used. Involves modifying
 				 read/write_abstract_arg() to work on two 64b values. */
@@ -4523,18 +4585,20 @@ access_memory_progbuf(struct target *target, const struct riscv_mem_access_args 
 
 	riscv_reg_t mstatus = 0;
 	riscv_reg_t mstatus_old = 0;
+	riscv_reg_t mstatush = 0;
+	riscv_reg_t mstatush_old = 0;
 	riscv_reg_t dcsr = 0;
 	riscv_reg_t dcsr_old = 0;
-	if (modify_privilege_for_virt2phys_mode(target,
-			&mstatus, &mstatus_old, &dcsr, &dcsr_old) != ERROR_OK)
+	if (modify_privilege_progbuf(target, &mstatus, &mstatus_old, &mstatush,
+			&mstatush_old, &dcsr, &dcsr_old, args.mode) != ERROR_OK)
 		return mem_access_result(MEM_ACCESS_SKIPPED_PRIV_MOD_FAILED);
 
 	struct mem_access_result result = is_read ?
 			read_memory_progbuf(target, args) :
 			write_memory_progbuf(target, args);
 
-	if (restore_privilege_from_virt2phys_mode(target,
-			mstatus, mstatus_old, dcsr, dcsr_old) != ERROR_OK)
+	if (restore_privilege_progbuf(target, mstatus, mstatus_old,
+			mstatush, mstatush_old, dcsr, dcsr_old) != ERROR_OK)
 		return mem_access_result(MEM_ACCESS_FAILED_PRIV_MOD_FAILED);
 
 	return result;
@@ -4599,6 +4663,10 @@ riscv013_access_memory(struct target *target, const struct riscv_mem_access_args
 
 	const bool is_read = riscv_mem_access_is_read(args);
 	const char *const access_type = is_read ? "read" : "write";
+	LOG_TARGET_DEBUG(target, "Memory %s: addr=0x%" TARGET_PRIxADDR
+			" (%s), size=%" PRIu32 ", count=%" PRIu32 ", increment=%" PRIu32,
+			access_type, args.address, args.mode == RISCV_MODE_M ? "physical" : "virtual",
+			args.size, args.count, args.increment);
 	if (!is_read && args.increment != args.size) {
 		LOG_TARGET_ERROR(target, "Write increment size has to be equal to element size");
 		return ERROR_NOT_IMPLEMENTED;
@@ -5218,10 +5286,10 @@ static int select_prepped_harts(struct target *target)
 	if (!hawindow)
 		return ERROR_FAIL;
 
-	target_list_t *entry;
+	struct target_list *entry;
 	unsigned int total_selected = 0;
 	unsigned int selected_index = 0;
-	list_for_each_entry(entry, &dm->target_list, list) {
+	list_for_each_entry(entry, &dm->target_list, lh) {
 		struct target *t = entry->target;
 		struct riscv_info *info = riscv_info(t);
 		riscv013_info_t *info_013 = get_info(t);
@@ -5316,8 +5384,8 @@ static int riscv013_halt_go(struct target *target)
 	dm_write(target, DM_DMCONTROL, dmcontrol);
 
 	if (dm->current_hartid == HART_INDEX_MULTIPLE) {
-		target_list_t *entry;
-		list_for_each_entry(entry, &dm->target_list, list) {
+		struct target_list *entry;
+		list_for_each_entry(entry, &dm->target_list, lh) {
 			struct target *t = entry->target;
 			uint32_t t_dmstatus;
 			if (get_field(dmstatus, DM_DMSTATUS_ALLHALTED) ||
@@ -5408,6 +5476,16 @@ static enum riscv_halt_reason riscv013_halt_reason(struct target *target)
 		return RISCV_HALT_INTERRUPT;
 	case CSR_DCSR_CAUSE_GROUP:
 		return RISCV_HALT_GROUP;
+	case CSR_DCSR_CAUSE_OTHER:
+		switch (get_field(dcsr, CSR_DCSR_EXTCAUSE)) {
+		case 0:
+			LOG_TARGET_INFO(target, "halted because of hart in a critical error state");
+			return RISCV_HALT_CRITICAL_ERROR;
+		default:
+			LOG_TARGET_ERROR(target, "Unknown DCSR extcause field: 0x%"
+					PRIx64, get_field(dcsr, CSR_DCSR_EXTCAUSE));
+			return RISCV_HALT_UNKNOWN;
+		}
 	}
 
 	LOG_TARGET_ERROR(target, "Unknown DCSR cause field: 0x%" PRIx64, get_field(dcsr, CSR_DCSR_CAUSE));
@@ -5505,7 +5583,7 @@ static int riscv013_on_step_or_resume(struct target *target, bool step)
 		if (execute_autofence(target) != ERROR_OK)
 			return ERROR_FAIL;
 
-	if (set_dcsr_ebreak(target, step) != ERROR_OK)
+	if (set_dcsr_config(target, step) != ERROR_OK)
 		return ERROR_FAIL;
 
 	if (riscv_reg_flush_all(target) != ERROR_OK)

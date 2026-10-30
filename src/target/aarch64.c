@@ -755,14 +755,17 @@ static int aarch64_do_restart_one(struct target *target, enum restart_mode mode)
 	if (mode == RESTART_SYNC) {
 		int64_t then = timeval_ms();
 		for (;;) {
+			uint32_t prsr;
 			int resumed;
 			/*
-			 * if PRSR.SDR is set now, the target did restart, even
-			 * if it's now already halted again (e.g. due to breakpoint)
+			 * If PRSR.SDR is set now, the target did restart, even
+			 * if it's now already halted again (e.g. due to breakpoint).
+			 * Some systems do not reliably latch SDR for this CTI resume,
+			 * so also accept PRSR.HALT clearing as proof of resume.
 			 */
 			retval = aarch64_check_state_one(target,
-						PRSR_SDR, PRSR_SDR, &resumed, NULL);
-			if (retval != ERROR_OK || resumed)
+						PRSR_SDR, PRSR_SDR, &resumed, &prsr);
+			if (retval != ERROR_OK || resumed || !(prsr & PRSR_HALT))
 				break;
 
 			if (timeval_ms() > then + 1000) {
@@ -1297,7 +1300,7 @@ static int aarch64_restore_context(struct target *target, bool bpwp)
 }
 
 /*
- * Cortex-A8 Breakpoint and watchpoint functions
+ * AArch64 Breakpoint and watchpoint functions
  */
 
 /* Setup hardware Breakpoint Register Pair */
@@ -1951,7 +1954,7 @@ static int aarch64_hit_watchpoint(struct target *target,
 }
 
 /*
- * Cortex-A8 Reset functions
+ * AArch64 Reset functions
  */
 
 static int aarch64_enable_reset_catch(struct target *target, bool enable)
@@ -2829,7 +2832,7 @@ static int aarch64_examine(struct target *target)
 }
 
 /*
- *	Cortex-A8 target creation and initialization
+ *	AArch64 target creation and initialization
  */
 
 static int aarch64_init_target(struct command_context *cmd_ctx,
@@ -2918,6 +2921,7 @@ static void aarch64_deinit_target(struct target *target)
 		dap_put_ap(armv8->debug_ap);
 
 	armv8_free_reg_cache(target);
+	free(aarch64->wp_list);
 	free(aarch64->brp_list);
 	free(dpm->dbp);
 	free(dpm->dwp);

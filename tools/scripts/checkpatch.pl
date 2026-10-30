@@ -512,9 +512,14 @@ our $InitAttributeConst = qr{$InitAttributePrefix(?:initconst\b)};
 our $InitAttributeInit = qr{$InitAttributePrefix(?:init\b)};
 our $InitAttribute = qr{$InitAttributeData|$InitAttributeConst|$InitAttributeInit};
 
+# OpenOCD specific: Begin: list of attributes
+our $OpenOCD_Attribute = qr{__interrupt};
+# OpenOCD specific: End
+
 # Notes to $Attribute:
 # We need \b after 'init' otherwise 'initconst' will cause a false positive in a check
 our $Attribute	= qr{
+			$OpenOCD_Attribute|
 			const|
 			volatile|
 			__percpu|
@@ -623,7 +628,7 @@ our $logFunctions = qr{(?x:
 } # !$OpenOCD
 # OpenOCD specific: Begin: list log functions
 our $logFunctions = qr{(?x:
-	LOG_(?:TARGET_|)(?:DEBUG_IO|DEBUG|INFO|WARNING|ERROR|USER|USER_N|OUTPUT)
+	LOG_(?:TARGET_|)(?:DEBUG_IO|DEBUG|INFO|WARNING|ERROR|USER|USER_N|OUTPUT|CUSTOM_LEVEL)
 )};
 # OpenOCD specific: End
 

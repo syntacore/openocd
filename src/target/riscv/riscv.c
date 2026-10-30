@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include <assert.h>
 #include <stdlib.h>
 #include <time.h>
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
 
 #include <helper/log.h>
 #include <helper/time_support.h>
@@ -141,18 +142,24 @@ struct tdata1_cache {
 	struct list_head elem_tdata1;
 };
 
-bool riscv_virt2phys_mode_is_hw(const struct target *target)
+static bool riscv_virt2phys_mode_is_hw(const struct target *target)
 {
 	assert(target);
 	RISCV_INFO(r);
 	return r->virt2phys_mode == RISCV_VIRT2PHYS_MODE_HW;
 }
 
-bool riscv_virt2phys_mode_is_sw(const struct target *target)
+static bool riscv_virt2phys_mode_is_sw(const struct target *target)
 {
 	assert(target);
 	RISCV_INFO(r);
 	return r->virt2phys_mode == RISCV_VIRT2PHYS_MODE_SW;
+}
+
+static bool riscv_virt2phys_mode_is_off(const struct target *target)
+{
+	assert(target);
+	return riscv_info(target)->virt2phys_mode == RISCV_VIRT2PHYS_MODE_OFF;
 }
 
 const char *riscv_virt2phys_mode_to_str(enum riscv_virt2phys_mode mode)
@@ -477,7 +484,7 @@ static struct target_type *get_target_type(struct target *target)
 
 struct riscv_private_config *alloc_default_riscv_private_config(void)
 {
-	struct riscv_private_config * const config = malloc(sizeof(*config));
+	struct riscv_private_config * const config = calloc(1, sizeof(*config));
 	if (!config) {
 		LOG_ERROR("Out of memory!");
 		return NULL;
@@ -523,6 +530,12 @@ static struct jim_nvp nvp_ebreak_mode_opts[] = {
 	{ .name = "exception", .value = false },
 	{ .name = "halt", .value = true },
 	{ .name = NULL, .value = RISCV_EBREAK_MODE_INVALID }
+};
+
+static struct jim_nvp nvp_on_off_opts[] = {
+	{ .name = "off", .value = false },
+	{ .name = "on", .value = true },
+	{ .name = NULL, .value = -1 }
 };
 
 static int jim_configure_ebreak(struct riscv_private_config *config, struct jim_getopt_info *goi)
@@ -613,11 +626,13 @@ static int jim_report_ebreak_config(const struct riscv_private_config *config,
 
 enum riscv_cfg_opts {
 	RISCV_CFG_EBREAK,
+	RISCV_CFG_CETRIG,
 	RISCV_CFG_INVALID = -1
 };
 
 static struct jim_nvp nvp_config_opts[] = {
 	{ .name = "-ebreak", .value = RISCV_CFG_EBREAK },
+	{ .name = "-cetrig", .value = RISCV_CFG_CETRIG },
 	{ .name = NULL, .value = RISCV_CFG_INVALID }
 };
 
@@ -654,10 +669,24 @@ int riscv_jim_configure(struct target *target,
 		return goi->is_configure
 			? jim_configure_ebreak(config, goi)
 			: jim_report_ebreak_config(config, goi->interp);
+	case RISCV_CFG_CETRIG:
+		if (goi->is_configure) {
+			struct jim_nvp *opt_nvp;
+			e = jim_getopt_nvp(goi, nvp_on_off_opts, &opt_nvp);
+			if (e != JIM_OK) {
+				jim_getopt_nvp_unknown(goi, nvp_on_off_opts, /*hadprefix*/ true);
+				return e;
+			}
+			config->dcsr_cetrig = opt_nvp->value;
+		} else {
+			Jim_SetResultString(goi->interp,
+				jim_nvp_value2name_simple(nvp_on_off_opts, config->dcsr_cetrig)->name, -1);
+		}
+		break;
 	default:
 		assert(false && "'jim_getopt_nvp' should have returned an error.");
 	}
-	return JIM_ERR;
+	return JIM_OK;
 }
 
 int riscv_init_target(struct command_context *cmd_ctx,
@@ -2644,6 +2673,9 @@ static int set_debug_reason(struct target *target, enum riscv_halt_reason halt_r
 	case RISCV_HALT_SINGLESTEP:
 		target->debug_reason = DBG_REASON_SINGLESTEP;
 		break;
+	case RISCV_HALT_CRITICAL_ERROR:
+		target->debug_reason = DBG_REASON_EXC_CATCH;
+		break;
 	case RISCV_HALT_UNKNOWN:
 		target->debug_reason = DBG_REASON_UNDEFINED;
 		break;
@@ -3009,59 +3041,115 @@ int riscv_target_resume(struct target *target, bool current,
 			debug_execution, false);
 }
 
-static int riscv_effective_privilege_mode(struct target *target, int *v_mode, int *effective_mode)
+static const char *riscv_priv_mode_to_str(enum riscv_priv_mode mode)
 {
+	switch (mode) {
+	case RISCV_MODE_M:
+		return "M";
+	case RISCV_MODE_S:
+		return "S";
+	case RISCV_MODE_U:
+		return "U";
+	case RISCV_MODE_VS:
+		return "VS";
+	case RISCV_MODE_VU:
+		return "VU";
+	case N_RISCV_MODE:
+		break;
+	}
+	assert(false && "Unknown privilege mode");
+	return "?";
+}
+
+static bool riscv_priv_mode_is_guest(enum riscv_priv_mode mode)
+{
+	return mode == RISCV_MODE_VS || mode == RISCV_MODE_VU;
+}
+
+static int riscv_effective_privilege_mode(struct target *target, enum riscv_priv_mode *mode)
+{
+	assert(target);
+	assert(mode);
+
 	riscv_reg_t priv;
 	if (riscv_reg_get(target, &priv, GDB_REGNO_PRIV) != ERROR_OK) {
 		LOG_TARGET_ERROR(target, "Failed to read priv register.");
 		return ERROR_FAIL;
 	}
-	*v_mode = get_field(priv, VIRT_PRIV_V);
 
-	riscv_reg_t mstatus;
-	if (riscv_reg_get(target, &mstatus, GDB_REGNO_MSTATUS) != ERROR_OK) {
+	unsigned int dcsr_prv = get_field(priv, VIRT_PRIV_PRV);
+	bool halted_in_m = dcsr_prv == PRV_M;
+
+	/* MPRV only applies in Machine mode, so below it mstatus says nothing
+	 * about the mode an access runs in. */
+	riscv_reg_t mstatus = 0;
+	if (halted_in_m
+			&& riscv_reg_get(target, &mstatus, GDB_REGNO_MSTATUS) != ERROR_OK) {
 		LOG_TARGET_ERROR(target, "Failed to read mstatus register.");
 		return ERROR_FAIL;
 	}
 
-	if (get_field(mstatus, MSTATUS_MPRV))
-		*effective_mode = get_field(mstatus, MSTATUS_MPP);
-	else
-		*effective_mode = get_field(priv, VIRT_PRIV_PRV);
+	bool mprv = halted_in_m && get_field(mstatus, MSTATUS_MPRV);
+	unsigned int prv = mprv ? get_field(mstatus, MSTATUS_MPP) : dcsr_prv;
 
-	LOG_TARGET_DEBUG(target, "Effective mode=%d; v=%d", *effective_mode, *v_mode);
-
-	return ERROR_OK;
-}
-
-int riscv_mmu(struct target *target, bool *enabled)
-{
-	*enabled = false;
-
-	if (!riscv_virt2phys_mode_is_sw(target))
+	/* MPV is ignored where MPP names Machine mode, so v is not read there. */
+	if (prv == PRV_M) {
+		*mode = RISCV_MODE_M;
+		LOG_TARGET_DEBUG(target, "Effective privilege mode: %s", riscv_priv_mode_to_str(*mode));
 		return ERROR_OK;
+	}
 
-	/* Don't use MMU in explicit or effective M (machine) mode */
-	riscv_reg_t priv;
-	if (riscv_reg_get(target, &priv, GDB_REGNO_PRIV) != ERROR_OK) {
-		LOG_TARGET_ERROR(target, "Failed to read priv register.");
+	bool v = false;
+	if (!mprv) {
+		v = get_field(priv, VIRT_PRIV_V);
+	} else if (!riscv_supports_extension(target, 'H')) {
+		v = false;
+	} else if (riscv_xlen(target) != 32) {
+		v = get_field(mstatus, MSTATUS_MPV);
+	} else {
+		riscv_reg_t mstatush;
+		if (riscv_reg_get(target, &mstatush, GDB_REGNO_MSTATUSH) != ERROR_OK) {
+			LOG_TARGET_ERROR(target, "Failed to read mstatush register");
+			return ERROR_FAIL;
+		}
+		v = get_field(mstatush, MSTATUSH_MPV);
+	}
+
+	if (prv == PRV_S) {
+		*mode = v ? RISCV_MODE_VS : RISCV_MODE_S;
+	} else if (prv == PRV_U) {
+		*mode = v ? RISCV_MODE_VU : RISCV_MODE_U;
+	} else {
+		LOG_TARGET_ERROR(target, "Hart reports a reserved privilege mode %u in %s, "
+				"which is a hardware bug", prv, mprv ? "mstatus.MPP" : "dcsr.prv");
 		return ERROR_FAIL;
 	}
 
-	int effective_mode;
-	int v_mode;
-	if (riscv_effective_privilege_mode(target, &v_mode, &effective_mode) != ERROR_OK)
-		return ERROR_FAIL;
+	LOG_TARGET_DEBUG(target, "Effective privilege mode: %s", riscv_priv_mode_to_str(*mode));
+	return ERROR_OK;
+}
+
+static int riscv_mmu_impl(struct target *target,
+		enum riscv_priv_mode mode, bool *enabled)
+{
+	assert(target);
+	assert(enabled);
+
+	*enabled = false;
+
+	if (mode == RISCV_MODE_M) {
+		LOG_TARGET_DEBUG(target, "SATP/MMU ignored in Machine mode");
+		return ERROR_OK;
+	}
 
 	unsigned int xlen = riscv_xlen(target);
 
-	if (v_mode) {
+	if (riscv_priv_mode_is_guest(mode)) {
 		/* In VU or VS mode, MMU is considered enabled when
 		 * either hgatp or vsatp mode is not OFF */
 		riscv_reg_t vsatp;
 		if (riscv_reg_get(target, &vsatp, GDB_REGNO_VSATP) != ERROR_OK) {
-			LOG_TARGET_ERROR(target, "Failed to read vsatp register; priv=0x%" PRIx64,
-					priv);
+			LOG_TARGET_ERROR(target, "Failed to read vsatp register");
 			return ERROR_FAIL;
 		}
 		/* vsatp is identical to satp, so we can use the satp macros. */
@@ -3073,8 +3161,7 @@ int riscv_mmu(struct target *target, bool *enabled)
 
 		riscv_reg_t hgatp;
 		if (riscv_reg_get(target, &hgatp, GDB_REGNO_HGATP) != ERROR_OK) {
-			LOG_TARGET_ERROR(target, "Failed to read hgatp register; priv=0x%" PRIx64,
-					priv);
+			LOG_TARGET_ERROR(target, "Failed to read hgatp register");
 			return ERROR_FAIL;
 		}
 		if (get_field(hgatp, RISCV_HGATP_MODE(xlen)) != HGATP_MODE_OFF) {
@@ -3084,12 +3171,6 @@ int riscv_mmu(struct target *target, bool *enabled)
 			LOG_TARGET_DEBUG(target, "No V-mode address translation enabled.");
 		}
 
-		return ERROR_OK;
-	}
-
-	/* Don't use MMU in explicit or effective M (machine) mode */
-	if (effective_mode == PRV_M) {
-		LOG_TARGET_DEBUG(target, "SATP/MMU ignored in Machine mode.");
 		return ERROR_OK;
 	}
 
@@ -3108,6 +3189,23 @@ int riscv_mmu(struct target *target, bool *enabled)
 	}
 
 	return ERROR_OK;
+}
+
+int riscv_mmu(struct target *target, bool *enabled)
+{
+	assert(target);
+	assert(enabled);
+
+	*enabled = false;
+
+	if (!riscv_virt2phys_mode_is_sw(target))
+		return ERROR_OK;
+
+	enum riscv_priv_mode mode = RISCV_MODE_M;
+	if (riscv_effective_privilege_mode(target, &mode) != ERROR_OK)
+		return ERROR_FAIL;
+
+	return riscv_mmu_impl(target, mode, enabled);
 }
 
 /* Translate address from virtual to physical, using info and ppn.
@@ -3153,6 +3251,7 @@ static int riscv_address_translate(struct target *target,
 		assert(info->pte_shift <= 3);
 		const struct riscv_mem_access_args args = {
 			.address = pte_address,
+			.mode = RISCV_MODE_M,
 			.read_buffer = buffer,
 			.size = 4,
 			.increment = 4,
@@ -3320,8 +3419,20 @@ static int riscv_virt2phys_v(struct target *target, target_addr_t virtual, targe
 
 int riscv_virt2phys(struct target *target, target_addr_t virtual, target_addr_t *physical)
 {
-	bool enabled;
-	if (riscv_mmu(target, &enabled) != ERROR_OK)
+	/* TODO: translate the address in the other modes as well. */
+	if (!riscv_virt2phys_mode_is_sw(target)) {
+		*physical = virtual;
+		LOG_TARGET_DEBUG(target, "Address translation is off. 0x%" TARGET_PRIxADDR
+				" -> 0x%" TARGET_PRIxADDR, virtual, *physical);
+		return ERROR_OK;
+	}
+
+	enum riscv_priv_mode mode = RISCV_MODE_M;
+	if (riscv_effective_privilege_mode(target, &mode) != ERROR_OK)
+		return ERROR_FAIL;
+
+	bool enabled = false;
+	if (riscv_mmu_impl(target, mode, &enabled) != ERROR_OK)
 		return ERROR_FAIL;
 	if (!enabled) {
 		*physical = virtual;
@@ -3329,13 +3440,7 @@ int riscv_virt2phys(struct target *target, target_addr_t virtual, target_addr_t 
 		return ERROR_OK;
 	}
 
-	riscv_reg_t priv;
-	if (riscv_reg_get(target, &priv, GDB_REGNO_PRIV) != ERROR_OK) {
-		LOG_TARGET_ERROR(target, "Failed to read priv register.");
-		return ERROR_FAIL;
-	}
-
-	if (priv & VIRT_PRIV_V)
+	if (riscv_priv_mode_is_guest(mode))
 		return riscv_virt2phys_v(target, virtual, physical);
 
 	riscv_reg_t satp_value;
@@ -3396,6 +3501,7 @@ int riscv_read_phys_memory(struct target *target, target_addr_t phys_address,
 {
 	const struct riscv_mem_access_args args = {
 		.address = phys_address,
+		.mode = RISCV_MODE_M,
 		.read_buffer = buffer,
 		.size = size,
 		.count = count,
@@ -3410,6 +3516,7 @@ int riscv_write_phys_memory(struct target *target, target_addr_t phys_address,
 {
 	const struct riscv_mem_access_args args = {
 		.address = phys_address,
+		.mode = RISCV_MODE_M,
 		.write_buffer = buffer,
 		.size = size,
 		.count = count,
@@ -3420,7 +3527,7 @@ int riscv_write_phys_memory(struct target *target, target_addr_t phys_address,
 	return r->access_memory(target, args);
 }
 
-static int riscv_rw_memory(struct target *target, const struct riscv_mem_access_args args)
+static int riscv_rw_memory(struct target *target, struct riscv_mem_access_args args)
 {
 	assert(riscv_mem_access_is_valid(args));
 
@@ -3431,12 +3538,34 @@ static int riscv_rw_memory(struct target *target, const struct riscv_mem_access_
 		return ERROR_OK;
 	}
 
-	bool mmu_enabled;
-	int result = riscv_mmu(target, &mmu_enabled);
+	struct riscv_info *r = riscv_info(target);
+
+	args.mode = RISCV_MODE_M;
+
+	if (riscv_virt2phys_mode_is_off(target))
+		return r->access_memory(target, args);
+
+	enum riscv_priv_mode mode = RISCV_MODE_M;
+	if (riscv_effective_privilege_mode(target, &mode) != ERROR_OK)
+		return ERROR_FAIL;
+
+	if (riscv_virt2phys_mode_is_hw(target)) {
+		if (riscv_priv_mode_is_guest(mode)) {
+			LOG_TARGET_ERROR(target, "Cannot translate a guest access in "
+					"hardware: OpenOCD does not set mstatus.MPV yet. "
+					"Use 'riscv virt2phys_mode sw'.");
+			return ERROR_FAIL;
+		}
+
+		args.mode = mode;
+		return r->access_memory(target, args);
+	}
+
+	bool mmu_enabled = false;
+	int result = riscv_mmu_impl(target, mode, &mmu_enabled);
 	if (result != ERROR_OK)
 		return result;
 
-	RISCV_INFO(r);
 	if (!mmu_enabled)
 		return r->access_memory(target, args);
 
@@ -3856,7 +3985,7 @@ static int riscv_poll_hart(struct target *target, enum riscv_next_action *next_a
 {
 	RISCV_INFO(r);
 
-	LOG_TARGET_DEBUG(target, "polling, target->state=%d", target->state);
+	LOG_TARGET_DEBUG_IO(target, "polling, target->state=%d", target->state);
 
 	*next_action = RPH_NONE;
 
@@ -4033,7 +4162,7 @@ exit:
 /*** OpenOCD Interface ***/
 int riscv_openocd_poll(struct target *target)
 {
-	LOG_TARGET_DEBUG(target, "Polling all harts.");
+	LOG_TARGET_DEBUG_IO(target, "Polling all harts.");
 
 	struct riscv_info *i = riscv_info(target);
 
@@ -4092,7 +4221,7 @@ int riscv_openocd_poll(struct target *target)
 		}
 	}
 
-	LOG_TARGET_DEBUG(target, "should_remain_halted=%d, should_resume=%d",
+	LOG_TARGET_DEBUG_IO(target, "should_remain_halted=%d, should_resume=%d",
 				should_remain_halted, should_resume);
 	if (should_remain_halted && should_resume) {
 		LOG_TARGET_WARNING(target, "%d harts should remain halted, and %d should resume.",
@@ -4342,21 +4471,42 @@ COMMAND_HANDLER(riscv_set_reset_timeout_sec)
 	return ERROR_OK;
 }
 
-COMMAND_HANDLER(riscv_set_mem_access)
+COMMAND_HANDLER(riscv_mem_access)
 {
 	struct target *target = get_current_target(CMD_CTX);
 	RISCV_INFO(r);
-	int progbuf_cnt = 0;
-	int sysbus_cnt = 0;
-	int abstract_cnt = 0;
 
-	if (CMD_ARGC < 1 || CMD_ARGC > RISCV_MEM_ACCESS_MAX_METHODS_NUM) {
-		command_print(CMD, "Command takes 1 to %d parameters",
-				RISCV_MEM_ACCESS_MAX_METHODS_NUM);
-		return ERROR_COMMAND_ARGUMENT_INVALID;
+	if (CMD_ARGC == 0) {
+		for (unsigned int i = 0; i < r->num_enabled_mem_access_methods; i++) {
+			if (i > 0)
+				command_print_sameline(CMD, " ");
+
+			switch (r->mem_access_methods[i]) {
+			case RISCV_MEM_ACCESS_PROGBUF:
+				command_print_sameline(CMD, "progbuf");
+				break;
+			case RISCV_MEM_ACCESS_SYSBUS:
+				command_print_sameline(CMD, "sysbus");
+				break;
+			case RISCV_MEM_ACCESS_ABSTRACT:
+				command_print_sameline(CMD, "abstract");
+				break;
+			default:
+				command_print(CMD, "BUG: invalid memory access type");
+				return ERROR_FAIL;
+			}
+		}
+		return ERROR_OK;
 	}
 
-	/* Check argument validity */
+	if (CMD_ARGC > RISCV_MEM_ACCESS_MAX_METHODS_NUM)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	unsigned int progbuf_cnt = 0;
+	unsigned int sysbus_cnt = 0;
+	unsigned int abstract_cnt = 0;
+
+	// Check argument validity.
 	for (unsigned int i = 0; i < CMD_ARGC; i++) {
 		if (strcmp("progbuf", CMD_ARGV[i]) == 0) {
 			progbuf_cnt++;
@@ -4365,17 +4515,17 @@ COMMAND_HANDLER(riscv_set_mem_access)
 		} else if (strcmp("abstract", CMD_ARGV[i]) == 0) {
 			abstract_cnt++;
 		} else {
-			LOG_ERROR("Unknown argument '%s'. "
-				"Must be one of: 'progbuf', 'sysbus' or 'abstract'.", CMD_ARGV[i]);
-			return ERROR_COMMAND_SYNTAX_ERROR;
+			command_print(CMD, "unknown method '%s', "
+				"must be one of: 'progbuf', 'sysbus' or 'abstract'", CMD_ARGV[i]);
+			return ERROR_COMMAND_ARGUMENT_INVALID;
 		}
 	}
 	if (progbuf_cnt > 1 || sysbus_cnt > 1 || abstract_cnt > 1) {
-		LOG_ERROR("Syntax error - duplicate arguments to `riscv set_mem_access`.");
-		return ERROR_COMMAND_SYNTAX_ERROR;
+		command_print(CMD, "duplicate memory access methods");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
-	/* Args are valid, store them */
+	// Arguments are valid, store them.
 	r->num_enabled_mem_access_methods = CMD_ARGC;
 	for (unsigned int i = 0; i < CMD_ARGC; i++) {
 		if (strcmp("progbuf", CMD_ARGV[i]) == 0)
@@ -4386,13 +4536,22 @@ COMMAND_HANDLER(riscv_set_mem_access)
 			r->mem_access_methods[i] = RISCV_MEM_ACCESS_ABSTRACT;
 	}
 
-	/* Reset warning flags */
+	// Reset warning flags.
 	for (size_t i = 0; i < RISCV_MEM_ACCESS_MAX_METHODS_NUM; ++i)
 		r->mem_access_warn[i] = true;
 
 	return ERROR_OK;
 }
 
+COMMAND_HANDLER(riscv_set_mem_access)
+{
+	LOG_WARNING("DEPRECATED! use 'mem_access' not 'set_mem_access'");
+
+	if (CMD_ARGC == 0)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	return CALL_COMMAND_HANDLER(riscv_mem_access);
+}
 
 static bool parse_csr_address(const char *reg_address_str, unsigned int *reg_addr)
 {
@@ -5255,6 +5414,7 @@ COMMAND_HANDLER(handle_repeat_read)
 	}
 	const struct riscv_mem_access_args args = {
 		.address = address,
+		.mode = RISCV_MODE_M,
 		.read_buffer = buffer,
 		.size = size,
 		.count = count,
@@ -5664,7 +5824,7 @@ static const struct command_registration riscv_exec_command_handlers[] = {
 		.handler = handle_repeat_read,
 		.mode = COMMAND_ANY,
 		.usage = "count address [size=4]",
-		.help = "Repeatedly read the value at address."
+		.help = "Repeatedly read the value at the given physical address."
 	},
 	{
 		.name = "set_command_timeout_sec",
@@ -5685,7 +5845,14 @@ static const struct command_registration riscv_exec_command_handlers[] = {
 		.handler = riscv_set_mem_access,
 		.mode = COMMAND_ANY,
 		.usage = "method1 [method2] [method3]",
-		.help = "Set which memory access methods shall be used and in which order "
+		.help = "DEPRECATED: Use 'riscv mem_access' instead."
+	},
+	{
+		.name = "mem_access",
+		.handler = riscv_mem_access,
+		.mode = COMMAND_ANY,
+		.usage = "[method1 [method2 [method3]]]",
+		.help = "Configure which memory access methods shall be used and in which order "
 			"of priority. Method can be one of: 'progbuf', 'sysbus' or 'abstract'."
 	},
 	{
@@ -6370,6 +6537,15 @@ int riscv_enumerate_triggers(struct target *target)
 
 		if (disable_trigger_if_dmode(target, tdata1) != ERROR_OK)
 			return ERROR_FAIL;
+	}
+
+	if (t == ARRAY_SIZE(r->trigger_tinfo)) {
+		result = check_if_trigger_exists(target, t);
+		if (result == ERROR_FAIL)
+			return ERROR_FAIL;
+		if (result == ERROR_OK)
+			LOG_TARGET_WARNING(target, "Target has more than %zu triggers; ignoring remaining triggers",
+					ARRAY_SIZE(r->trigger_tinfo));
 	}
 
 	if (riscv_reg_set(target, GDB_REGNO_TSELECT, orig_tselect) != ERROR_OK)

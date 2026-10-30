@@ -1493,7 +1493,7 @@ static const struct dap_part_nums {
 	{ ARM_ID, 0x4c4, "Cortex-M4 ROM",              "(ROM Table)", },
 	{ ARM_ID, 0x4c7, "Cortex-M7 PPB ROM",          "(Private Peripheral Bus ROM Table)", },
 	{ ARM_ID, 0x4c8, "Cortex-M7 ROM",              "(ROM Table)", },
-	{ ARM_ID, 0x4c9, "STAR ROM",                   "(ROM Table)", },
+	{ ARM_ID, 0x4c9, "Cortex-M33 or STAR ROM",     "(ROM Table)", },
 	{ ARM_ID, 0x4e0, "Cortex-A35 ROM",             "(v7 Memory Map ROM Table)", },
 	{ ARM_ID, 0x4e4, "Cortex-A76 ROM",             "(ROM Table)", },
 	{ ARM_ID, 0x906, "CoreSight CTI",              "(Cross Trigger)", },
@@ -1572,7 +1572,7 @@ static const struct dap_part_nums {
 	{ ARM_ID, 0xd0c, "Neoverse N1",                "(Debug Unit)", },
 	{ ARM_ID, 0xd13, "Cortex-R52 Debug",           "(Debug Unit)", },
 	{ ARM_ID, 0xd16, "Cortex-R52+ Debug",          "(Debug Unit)", },
-	{ ARM_ID, 0xd21, "STAR Debug",                 "(Debug Unit)", },
+	{ ARM_ID, 0xd21, "Cortex-M33 or STAR Debug",   "(Debug Unit)", },
 	{ ARM_ID, 0xd22, "Cortex-M55 Debug",           "(Debug Unit)", },
 	{ ARM_ID, 0xd43, "Cortex-A65AE Debug",         "(Debug Unit)", },
 	{ ARM_ID, 0xd49, "Neoverse N2",                "(Debug Unit)", },
@@ -1594,6 +1594,12 @@ static const struct dap_part_nums {
 	{ 0x1eb,  0x211, "Tegra 210 ROM",              "(ROM Table)", },
 	{ 0x1eb,  0x302, "Denver Debug",               "(Debug Unit)", },
 	{ 0x1eb,  0x402, "Denver PMU",                 "(Performance Monitor Unit)", },
+	{ 0x516,  0x212, "Ampere Altra Max ROM",       "(ROM Table)", },
+	{ 0x516,  0x280, "Ampere Altra ROM",           "(ROM Table)", },
+	{ 0x516,  0x310, "AmpereOne AC03 ROM",         "(ROM Table)", },
+	{ 0x516,  0x410, "AmpereOne AC04 ROM",         "(ROM Table)", },
+	{ 0x516,  0x411, "AmpereOneM AC04_1 ROM",      "(ROM Table)", },
+	{ 0x516,  0xac3, "AmpereOne Family ROM",       "(ROM Table)", },
 	{ 0x575,  0x132, "STAR SCS",                   "(System Control Space)", },
 	{ 0x575,  0x4d2, "Cortex-M52 ROM",             "(ROM Table)", },
 	{ 0x575,  0xd24, "Cortex-M52 Debug",           "(Debug Unit)", },
@@ -2500,7 +2506,7 @@ int adiv5_jim_configure_ext(struct target *target, struct jim_getopt_info *goi,
 		if (target->tap_configured) {
 			pc->dap = NULL;
 			Jim_SetResultString(goi->interp,
-				"-chain-position and -dap configparams are mutually exclusive!", -1);
+				"-tap and -dap configparams are mutually exclusive", -1);
 			return JIM_ERR;
 		}
 		target->tap = pc->dap->tap;

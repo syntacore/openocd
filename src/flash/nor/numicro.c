@@ -30,6 +30,10 @@
 #include <target/armv7m.h>
 #include <target/cortex_m.h>
 
+/* Nuvoton NuMicro Flash Version */
+#define NUMICRO_M0_FLASH_VERSION  0x40003FFC
+#define NUMICRO_M0_FLASH_FMC2017  0x20171011   /* This version's FMC_BA should be 0x4000C000 */
+
 /* Nuvoton NuMicro register locations */
 #define NUMICRO_SYS_BASE        0x50000000
 #define NUMICRO_SYS_WRPROT      0x50000100
@@ -130,6 +134,23 @@ struct numicro_cpu_type {
 
 static const struct numicro_cpu_type numicro_parts[] = {
 	/*PART NO*/     /*PART ID*/ /*Banks*/
+	/* M031 */
+	{"M031EB0AE", 0x01131BA0, NUMICRO_BANKS_GENERAL(16 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031EC1AE", 0x01131CA0, NUMICRO_BANKS_GENERAL(32 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031FB0AE", 0x01131BB0, NUMICRO_BANKS_GENERAL(16 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031FC1AE", 0x01131CB0, NUMICRO_BANKS_GENERAL(32 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031LC2AE", 0x01131D01, NUMICRO_BANKS_GENERAL(32 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031LD2AE", 0x01131D00, NUMICRO_BANKS_GENERAL(64 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031LE3AE", 0x01131E00, NUMICRO_BANKS_GENERAL(128 * 1024, 0 * 1024, 4 * 1024, 12)},
+	{"M031SC2AE", 0x01131D11, NUMICRO_BANKS_GENERAL(32 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031SD2AE", 0x01131D10, NUMICRO_BANKS_GENERAL(64 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031SE3AE", 0x01131E10, NUMICRO_BANKS_GENERAL(128 * 1024, 0 * 1024, 4 * 1024, 12)},
+	{"M031TB0AE", 0x01131BE0, NUMICRO_BANKS_GENERAL(16 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031TC1AE", 0x01131CE0, NUMICRO_BANKS_GENERAL(32 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M031TD2AE", 0x01131DE0, NUMICRO_BANKS_GENERAL(64 * 1024,  0 * 1024, 2 * 1024, 12)},
+	{"M032LE3AE", 0x01132E00, NUMICRO_BANKS_GENERAL(128 * 1024, 0 * 1024, 4 * 1024, 12)},
+	{"M032SE3AE", 0x01132E10, NUMICRO_BANKS_GENERAL(128 * 1024, 0 * 1024, 4 * 1024, 12)},
+
 	/* M051AN */
 	{"M052LAN",  0x00005200, NUMICRO_BANKS_GENERAL(8 * 1024,  4 * 1024, 4 * 1024, 4)},
 	{"M054LAN",  0x00005400, NUMICRO_BANKS_GENERAL(16 * 1024, 4 * 1024, 4 * 1024, 4)},
@@ -540,6 +561,32 @@ static uint32_t m_page_size = NUMICRO_PAGESIZE;
 static uint32_t m_address_bias_offset;
 
 /* Private methods */
+static bool numicro_is_m0_fmc2017(struct target *target)
+{
+	uint32_t fmc_version;
+	int retval = ERROR_OK;
+
+	retval = target_read_u32(target, NUMICRO_M0_FLASH_VERSION, &fmc_version);
+	if (retval != ERROR_OK) {
+		LOG_WARNING("Could not read the value of NUMICRO_M0_FLASH_VERSION");
+		return false;
+	}
+
+	uint32_t offset = 0x0;
+	bool is_m0_fmc2017 = false;
+
+	if (fmc_version == NUMICRO_M0_FLASH_FMC2017) {
+		offset = 0x10000000;
+		is_m0_fmc2017 = true;
+	}
+
+	LOG_DEBUG("This NuMicro M0 chip's FMC_BA is %0x08x (NUMICRO_M0_FLASH_VERSION: 0x%" PRIx32 ").",
+			  NUMICRO_FLASH_BASE - offset,
+			  fmc_version);
+
+	return is_m0_fmc2017;
+}
+
 static int numicro_get_arm_arch(struct target *target)
 {
 	struct armv7m_common *armv7m = target_to_armv7m(target);
@@ -551,7 +598,10 @@ static int numicro_get_arm_arch(struct target *target)
 	} else {
 		LOG_DEBUG("NuMicro arm architecture: armv6m\n");
 		m_page_size = NUMICRO_PAGESIZE;
-		m_address_bias_offset = 0x0;
+		if (numicro_is_m0_fmc2017(target))
+			m_address_bias_offset = 0x10000000;
+		else
+			m_address_bias_offset = 0x0;
 	}
 
 	return ERROR_OK;
@@ -684,10 +734,6 @@ static const uint8_t numicro_flash_write_code[] = {
 #include "../../../contrib/loaders/flash/numicro/numicro_m0.inc"
 };
 
-static const uint8_t numicro_m4_flash_write_code[] = {
-#include "../../../contrib/loaders/flash/numicro/numicro_m4.inc"
-};
-
 /* Program LongWord Block Write */
 static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 		uint32_t offset, uint32_t count)
@@ -697,7 +743,7 @@ static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 	struct working_area *write_algorithm;
 	struct working_area *source;
 	uint32_t address = bank->base + offset;
-	struct reg_param reg_params[3];
+	struct reg_param reg_params[4];
 	struct armv7m_algorithm armv7m_info;
 	int retval = ERROR_OK;
 
@@ -705,11 +751,10 @@ static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 	 * r0 - workarea buffer / result
 	 * r1 - target address
 	 * r2 - wordcount
+	 * r3 - FMC/ISP base address
 	 * Clobbered:
 	 * r4 - tmp
 	 * r5 - tmp
-	 * r6 - tmp
-	 * r7 - tmp
 	 */
 
 	/* Increase buffer_size if needed */
@@ -721,34 +766,18 @@ static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 		LOG_WARNING("offset 0x%" PRIx32 " breaks required 2-byte alignment", offset);
 		return ERROR_FLASH_DST_BREAKS_ALIGNMENT;
 	}
-	/* Difference between M0 and M4 */
-	if (m_page_size == NUMICRO_PAGESIZE) {
-		/* allocate working area with flash programming code */
-		if (target_alloc_working_area(target, sizeof(numicro_flash_write_code),
-			&write_algorithm) != ERROR_OK) {
-			LOG_WARNING("no working area available, can't do block memory writes");
-			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-		}
 
-		retval = target_write_buffer(target, write_algorithm->address,
-			sizeof(numicro_flash_write_code), numicro_flash_write_code);
-		if (retval != ERROR_OK)
-			return retval;
-	} else { /* for M4 */
-		/* allocate working area with flash programming code */
-		if (target_alloc_working_area(target, sizeof(numicro_m4_flash_write_code),
-			&write_algorithm) != ERROR_OK) {
-			LOG_WARNING("no working area available, can't do block memory writes");
-			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-		}
-
-		retval = target_write_buffer(target, write_algorithm->address,
-			sizeof(numicro_m4_flash_write_code), numicro_m4_flash_write_code);
-		if (retval != ERROR_OK)
-			return retval;
-
-		buffer_size = m_page_size;
+	/* allocate working area with flash programming code */
+	if (target_alloc_working_area(target, sizeof(numicro_flash_write_code),
+		&write_algorithm) != ERROR_OK) {
+		LOG_WARNING("no working area available, can't do block memory writes");
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 	}
+
+	retval = target_write_buffer(target, write_algorithm->address,
+		sizeof(numicro_flash_write_code), numicro_flash_write_code);
+	if (retval != ERROR_OK)
+		return retval;
 
 	/* memory buffer */
 	while (target_alloc_working_area(target, buffer_size, &source) != ERROR_OK) {
@@ -768,6 +797,7 @@ static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 	init_reg_param(&reg_params[0], "r0", 32, PARAM_IN_OUT); /* *pLW (*buffer) */
 	init_reg_param(&reg_params[1], "r1", 32, PARAM_OUT);    /* faddr */
 	init_reg_param(&reg_params[2], "r2", 32, PARAM_OUT);    /* number of words to program */
+	init_reg_param(&reg_params[3], "r3", 32, PARAM_OUT);    /* FMC/ISP base address */
 
 	/* write code buffer and use Flash programming code within NuMicro     */
 	/* Set breakpoint to 0 with time-out of 1000 ms                        */
@@ -781,11 +811,18 @@ static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 		buf_set_u32(reg_params[0].value, 0, 32, source->address);
 		buf_set_u32(reg_params[1].value, 0, 32, address);
 		buf_set_u32(reg_params[2].value, 0, 32, thisrun_count);
+		buf_set_u32(reg_params[3].value, 0, 32, NUMICRO_FLASH_ISPCON - m_address_bias_offset);
 
-		retval = target_run_algorithm(target, 0, NULL, 3, reg_params,
+		retval = target_run_algorithm(target, 0, NULL, 4, reg_params,
 				write_algorithm->address, 0, 100000, &armv7m_info);
 		if (retval != ERROR_OK) {
 			LOG_ERROR("Error executing NuMicro Flash programming algorithm");
+			retval = ERROR_FLASH_OPERATION_FAILED;
+			break;
+		}
+
+		if (buf_get_u32(reg_params[0].value, 0, 32) != ERROR_OK) {
+			LOG_ERROR("NuMicro Flash programming algorithm returned error");
 			retval = ERROR_FLASH_OPERATION_FAILED;
 			break;
 		}
@@ -801,6 +838,7 @@ static int numicro_writeblock(struct flash_bank *bank, const uint8_t *buffer,
 	destroy_reg_param(&reg_params[0]);
 	destroy_reg_param(&reg_params[1]);
 	destroy_reg_param(&reg_params[2]);
+	destroy_reg_param(&reg_params[3]);
 
 	return retval;
 }

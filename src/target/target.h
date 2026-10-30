@@ -188,7 +188,7 @@ struct target {
 	bool has_dap;						/* set to true if target has ADIv5 support */
 	bool dap_configured;				/* set to true if ADIv5 DAP is configured */
 	bool tap_configured;				/* set to true if JTAG tap has been configured
-										 * through -chain-position */
+										 * through -tap */
 
 	struct rtos *rtos;					/* Instance of Real Time Operating System support */
 	bool rtos_auto_detect;				/* A flag that indicates that the RTOS has been specified as "auto"
@@ -197,7 +197,8 @@ struct target {
 	 * poll too quickly because we'll just overwhelm the user with error
 	 * messages. */
 	struct backoff_timer backoff;
-	unsigned int smp;					/* Unique non-zero number for each SMP group */
+	bool smp;							/* set to true if smp is enabled */
+	unsigned int smp_id;				/* Unique non-zero number for each SMP group */
 	struct list_head *smp_targets;		/* list all targets in this smp group/cluster
 										 * The head of the list is shared between the
 										 * cluster, thus here there is a pointer */

@@ -2089,13 +2089,19 @@ int target_alloc_working_area_try(struct target *target, uint32_t size, struct w
 	if (target->backup_working_area) {
 		if (!c->backup) {
 			c->backup = malloc(c->size);
-			if (!c->backup)
+			if (!c->backup) {
+				LOG_TARGET_ERROR(target, "No memory for working area backup");
+				target_merge_working_areas(target);
 				return ERROR_FAIL;
+			}
 		}
 
 		int retval = target_read_memory(target, c->address, 4, c->size / 4, c->backup);
-		if (retval != ERROR_OK)
+		if (retval != ERROR_OK) {
+			LOG_TARGET_ERROR(target, "Working area backup failed");
+			target_merge_working_areas(target);
 			return retval;
+		}
 	}
 
 	/* mark as used, and return the new (reused) area */
@@ -2124,31 +2130,29 @@ int target_alloc_working_area(struct target *target, uint32_t size, struct worki
 
 static int target_restore_working_area(struct target *target, struct working_area *area)
 {
-	int retval = ERROR_OK;
+	if (!target->backup_working_area || !area->backup)
+		return ERROR_OK;
 
-	if (target->backup_working_area && area->backup) {
-		retval = target_write_memory(target, area->address, 4, area->size / 4, area->backup);
-		if (retval != ERROR_OK)
-			LOG_TARGET_ERROR(target, "failed to restore %" PRIu32 " bytes of working "
-					"area at address " TARGET_ADDR_FMT, area->size, area->address);
+	int retval = target_write_memory(target, area->address, 4,
+									 area->size / 4, area->backup);
+	if (retval != ERROR_OK) {
+		LOG_TARGET_ERROR(target, "failed to restore %" PRIu32
+						 " bytes of working area at address " TARGET_ADDR_FMT,
+						 area->size, area->address);
+		LOG_TARGET_INFO(target, "'resume' would fail, reset the target");
 	}
-
 	return retval;
 }
 
 /* Restore the area's backup memory, if any, and return the area to the allocation pool */
-static int target_free_working_area_restore(struct target *target, struct working_area *area, int restore)
+static int target_free_working_area_restore(struct target *target, struct working_area *area, bool restore)
 {
 	if (!area || area->free)
 		return ERROR_OK;
 
 	int retval = ERROR_OK;
-	if (restore) {
+	if (restore)
 		retval = target_restore_working_area(target, area);
-		/* REVISIT: Perhaps the area should be freed even if restoring fails. */
-		if (retval != ERROR_OK)
-			return retval;
-	}
 
 	area->free = true;
 
@@ -2171,13 +2175,13 @@ static int target_free_working_area_restore(struct target *target, struct workin
 
 int target_free_working_area(struct target *target, struct working_area *area)
 {
-	return target_free_working_area_restore(target, area, 1);
+	return target_free_working_area_restore(target, area, true);
 }
 
 /* free resources and restore memory, if restoring memory fails,
  * free up resources anyway
  */
-static void target_free_all_working_areas_restore(struct target *target, int restore)
+static void target_free_all_working_areas_restore(struct target *target, bool restore)
 {
 	struct working_area *c = target->working_areas;
 
@@ -2203,7 +2207,7 @@ static void target_free_all_working_areas_restore(struct target *target, int res
 
 void target_free_all_working_areas(struct target *target)
 {
-	target_free_all_working_areas_restore(target, 1);
+	target_free_all_working_areas_restore(target, true);
 
 	/* Now we have none or only one working area marked as free */
 	if (target->working_areas) {
@@ -2242,7 +2246,8 @@ static void free_smp_target_list(struct list_head *smp_targets)
 	struct target_list *head, *tmp;
 	list_for_each_entry_safe(head, tmp, smp_targets, lh) {
 		list_del(&head->lh);
-		head->target->smp = 0;
+		head->target->smp = false;
+		head->target->smp_id = 0;
 		head->target->smp_targets = &empty_smp_targets;
 		free(head);
 	}
@@ -3533,6 +3538,8 @@ static int target_fill_mem(struct target *target,
 		return ERROR_FAIL;
 	}
 
+	int retval = ERROR_OK;
+
 	for (unsigned int i = 0; i < chunk_size; i++) {
 		switch (data_size) {
 		case 8:
@@ -3548,11 +3555,11 @@ static int target_fill_mem(struct target *target,
 			target_buffer_set_u8(target, target_buf + i * data_size, b);
 			break;
 		default:
-			exit(-1);
+			LOG_ERROR("Unsupported data size %u", data_size);
+			retval = ERROR_FAIL;
+			goto err;
 		}
 	}
-
-	int retval = ERROR_OK;
 
 	for (unsigned int x = 0; x < c; x += chunk_size) {
 		unsigned int current;
@@ -3565,6 +3572,7 @@ static int target_fill_mem(struct target *target,
 		/* avoid GDB timeouts */
 		keep_alive();
 	}
+err:
 	free(target_buf);
 
 	return retval;
@@ -3675,6 +3683,10 @@ COMMAND_HANDLER(handle_load_image_command)
 	image_size = 0x0;
 	retval = ERROR_OK;
 	for (unsigned int i = 0; i < image.num_sections; i++) {
+		retval = CALL_COMMAND_HANDLER(detect_breakpoints_in_section, target, image.sections[i]);
+		if (retval != ERROR_OK)
+			return retval;
+
 		buffer = malloc(image.sections[i].size);
 		if (!buffer) {
 			command_print(CMD,
@@ -3948,6 +3960,37 @@ COMMAND_HANDLER(handle_verify_image_command)
 COMMAND_HANDLER(handle_test_image_command)
 {
 	return CALL_COMMAND_HANDLER(handle_verify_image_command_internal, IMAGE_TEST);
+}
+
+COMMAND_HANDLER(handle_calculate_checksum_command)
+{
+	if (CMD_ARGC != 2)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	struct target *target = get_current_target_or_null(CMD_CTX);
+
+	if (!target) {
+		command_print(CMD, "no target selected");
+		return ERROR_FAIL;
+	}
+
+	target_addr_t address;
+	COMMAND_PARSE_ADDRESS(CMD_ARGV[0], address);
+
+	uint32_t length;
+	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], length);
+
+	uint32_t checksum;
+	int retval = target_checksum_memory(target, address, length, &checksum);
+
+	if (retval != ERROR_OK) {
+		command_print(CMD, "checksum calculation failed");
+		return retval;
+	}
+
+	command_print(CMD, "0x%" PRIx32, checksum);
+
+	return ERROR_OK;
 }
 
 static int handle_bp_command_list(struct command_invocation *cmd)
@@ -4914,6 +4957,7 @@ enum target_cfg_param {
 	TCFG_ENDIAN,
 	TCFG_COREID,
 	TCFG_CHAIN_POSITION,
+	TCFG_TAP,
 	TCFG_DBGBASE,
 	TCFG_RTOS,
 	TCFG_DEFER_EXAMINE,
@@ -4931,6 +4975,7 @@ static struct nvp nvp_config_opts[] = {
 	{ .name = "-endian",           .value = TCFG_ENDIAN },
 	{ .name = "-coreid",           .value = TCFG_COREID },
 	{ .name = "-chain-position",   .value = TCFG_CHAIN_POSITION },
+	{ .name = "-tap",              .value = TCFG_TAP },
 	{ .name = "-dbgbase",          .value = TCFG_DBGBASE },
 	{ .name = "-rtos",             .value = TCFG_RTOS },
 	{ .name = "-defer-examine",    .value = TCFG_DEFER_EXAMINE },
@@ -5196,9 +5241,12 @@ static COMMAND_HELPER(target_configure, struct target *target, unsigned int inde
 			break;
 
 		case TCFG_CHAIN_POSITION:
+			LOG_TARGET_WARNING(target, "DEPRECATED! '-chain-position' will be removed in the future, use '-tap' instead");
+			/* fallthrough */
+		case TCFG_TAP:
 			if (is_configure) {
 				if (target->has_dap) {
-					command_print(CMD, "target requires -dap parameter instead of -chain-position!");
+					command_print(CMD, "target requires -dap parameter instead of -tap");
 					return ERROR_COMMAND_ARGUMENT_INVALID;
 				}
 
@@ -5452,7 +5500,7 @@ COMMAND_HANDLER(handle_target_reset)
 	/* determine if we should halt or not. */
 	target->reset_halt = (a != 0);
 	/* When this happens - all workareas are invalid. */
-	target_free_all_working_areas_restore(target, 0);
+	target_free_all_working_areas_restore(target, false);
 
 	/* do the assert */
 	if (n->value == NVP_ASSERT) {
@@ -5714,6 +5762,12 @@ static const struct command_registration target_instance_command_handlers[] = {
 		.usage = "address width data ['phys']",
 	},
 	{
+		.name = "calculate_checksum",
+		.handler = handle_calculate_checksum_command,
+		.mode = COMMAND_EXEC,
+		.usage = "address size",
+	},
+	{
 		.name = "eventlist",
 		.handler = handle_target_event_list,
 		.mode = COMMAND_EXEC,
@@ -5941,7 +5995,7 @@ COMMAND_HANDLER(handle_target_create)
 			}
 		} else {
 			if (!target->tap_configured) {
-				command_print(CMD, "-chain-position ?name? required when creating target");
+				command_print(CMD, "-tap ?name? required when creating target");
 				retval = ERROR_COMMAND_ARGUMENT_INVALID;
 			}
 		}
@@ -6135,7 +6189,8 @@ COMMAND_HANDLER(handle_target_smp)
 	}
 	foreach_smp_target(curr, lh) {
 		struct target *target = curr->target;
-		target->smp = smp_group;
+		target->smp = true;
+		target->smp_id = smp_group;
 		target->smp_targets = lh;
 	}
 	smp_group++;
@@ -6226,6 +6281,8 @@ COMMAND_HANDLER(handle_fast_load_image_command)
 	uint32_t image_size;
 	target_addr_t min_address = 0;
 	target_addr_t max_address = -1;
+
+	LOG_WARNING("DEPRECATED! command 'fast_load_image' will be removed in the future, use 'load_image' or 'write_memory' instead");
 
 	struct image image;
 
@@ -6323,6 +6380,8 @@ COMMAND_HANDLER(handle_fast_load_image_command)
 
 COMMAND_HANDLER(handle_fast_load_command)
 {
+	LOG_WARNING("DEPRECATED! command 'fast_load' will be removed in the future, use 'load_image' or 'write_memory' instead");
+
 	if (CMD_ARGC > 0)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	if (!fastload) {
@@ -6333,8 +6392,19 @@ COMMAND_HANDLER(handle_fast_load_command)
 	int64_t ms = timeval_ms();
 	int size = 0;
 	int retval = ERROR_OK;
+
+	struct target *target = get_current_target(CMD_CTX);
 	for (i = 0; i < fastload_num; i++) {
-		struct target *target = get_current_target(CMD_CTX);
+		struct imagesection section = {
+			.base_address = fastload[i].address,
+			.size = fastload[i].length,
+		};
+		retval = CALL_COMMAND_HANDLER(detect_breakpoints_in_section, target, section);
+		if (retval != ERROR_OK)
+			return retval;
+	}
+
+	for (i = 0; i < fastload_num; i++) {
 		command_print(CMD, "Write to 0x%08x, length 0x%08x",
 					  (unsigned int)(fastload[i].address),
 					  (unsigned int)(fastload[i].length));
@@ -6841,6 +6911,12 @@ static const struct command_registration target_exec_command_handlers[] = {
 		.handler = handle_target_write_memory,
 		.help = "Write Tcl list of 8/16/32/64 bit numbers to target memory",
 		.usage = "address width data ['phys']",
+	},
+	{
+		.name = "calculate_checksum",
+		.handler = handle_calculate_checksum_command,
+		.mode = COMMAND_EXEC,
+		.usage = "address size",
 	},
 	{
 		.name = "debug_reason",

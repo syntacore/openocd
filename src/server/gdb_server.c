@@ -27,6 +27,7 @@
 #include "config.h"
 #endif
 
+#include <helper/tcl-common.h>
 #include <target/breakpoints.h>
 #include <target/target_request.h>
 #include <target/register.h>
@@ -1565,42 +1566,40 @@ static int gdb_error(struct connection *connection, int retval)
 	return ERROR_OK;
 }
 
-static int gdb_read_memory_packet(struct connection *connection,
-		char const *packet, int packet_size)
+static int parse_packet_addr_len(char const *packet, uint64_t *addr, uint32_t *len)
 {
-	struct target *target = get_available_target_from_connection(connection);
 	char *separator;
-	uint64_t addr = 0;
-	uint32_t len = 0;
-
-	uint8_t *buffer;
-	char *hex_buffer;
-
-	int retval = ERROR_OK;
 
 	/* skip command character */
 	packet++;
 
-	addr = strtoull(packet, &separator, 16);
+	*addr = strtoull(packet, &separator, 16);
 
 	if (*separator != ',') {
 		LOG_ERROR("incomplete read memory packet received, dropping connection");
 		return ERROR_SERVER_REMOTE_CLOSED;
 	}
 
-	len = strtoul(separator + 1, NULL, 16);
-
-	if (!len) {
+	errno = 0;
+	long signed_len = strtol(separator + 1, NULL, 16);
+	if (errno == ERANGE || signed_len < 0 || (unsigned long)signed_len > UINT32_MAX) {
 		LOG_WARNING("invalid read memory packet received (len == 0)");
-		gdb_put_packet(connection, "", 0);
-		return ERROR_OK;
+		return ERROR_GDB_INVALID_PACKET_LEN;
 	}
 
-	buffer = malloc(len);
+	*len = (uint32_t)signed_len;
+
+	return ERROR_OK;
+}
+
+static int gdb_read_memory(struct connection *connection,
+		uint8_t *buffer, uint64_t addr, uint32_t len)
+{
+	struct target *target = get_available_target_from_connection(connection);
 
 	LOG_DEBUG("addr: 0x%16.16" PRIx64 ", len: 0x%8.8" PRIx32, addr, len);
 
-	retval = ERROR_NOT_IMPLEMENTED;
+	int retval = ERROR_NOT_IMPLEMENTED;
 	if (target->rtos)
 		retval = rtos_read_buffer(target, addr, len, buffer);
 	if (retval == ERROR_NOT_IMPLEMENTED)
@@ -1624,8 +1623,44 @@ static int gdb_read_memory_packet(struct connection *connection,
 		retval = ERROR_OK;
 	}
 
+	return retval;
+}
+
+static int gdb_read_memory_packet(struct connection *connection,
+		char const *packet, int packet_size)
+{
+	uint64_t addr;
+	uint32_t len;
+
+	uint8_t *buffer;
+	char *hex_buffer;
+
+	int retval = parse_packet_addr_len(packet, &addr, &len);
+
+	if (retval == ERROR_GDB_INVALID_PACKET_LEN) {
+		gdb_put_packet(connection, "", 0);
+		return ERROR_OK;
+	}
+	if (retval != ERROR_OK)
+		return retval;
+
+	buffer = malloc(len);
+	if (!buffer) {
+		LOG_ERROR("Unable to allocate memory");
+		gdb_send_error(connection, 01);
+		return ERROR_OK;
+	}
+
+	retval = gdb_read_memory(connection, buffer, addr, len);
+
 	if (retval == ERROR_OK) {
 		hex_buffer = malloc(len * 2 + 1);
+		if (!hex_buffer) {
+			LOG_ERROR("Unable to allocate memory for hex buffer");
+			gdb_send_error(connection, 01);
+			free(buffer);
+			return ERROR_OK;
+		}
 
 		size_t pkt_len = hexify(hex_buffer, buffer, len, len * 2 + 1);
 
@@ -1635,6 +1670,81 @@ static int gdb_read_memory_packet(struct connection *connection,
 	} else
 		retval = gdb_error(connection, retval);
 
+	free(buffer);
+
+	return retval;
+}
+
+static size_t escape_binary_data(const uint8_t *data, char *out, size_t data_len)
+{
+	assert(out);
+
+	size_t out_pos = 1;
+	out[0] = 'b';
+
+	for (size_t i = 0; i < data_len; ++i) {
+		uint8_t c = data[i];
+		/* See the logic for escaping binary data here:
+		 * https://sourceware.org/gdb/current/onlinedocs/gdb.html/Overview.html#Binary-Data */
+		if (c == 0x23 || c == 0x24 || c == 0x7d || c == 0x2a) {
+			out[out_pos++] = 0x7d;
+			out[out_pos++] = c ^ 0x20;
+		} else {
+			out[out_pos++] = c;
+		}
+	}
+
+	return out_pos;
+}
+
+static int gdb_read_memory_packet_binary(struct connection *connection,
+		char const *packet, int packet_size)
+{
+	uint64_t addr;
+	uint32_t len;
+
+	int retval = parse_packet_addr_len(packet, &addr, &len);
+
+	if (retval == ERROR_GDB_INVALID_PACKET_LEN) {
+		gdb_put_packet(connection, "", 0);
+		return ERROR_OK;
+	}
+	if (retval != ERROR_OK)
+		return retval;
+
+	uint8_t *buffer = malloc(len);
+	if (!buffer) {
+		LOG_ERROR("Unable to allocate memory");
+		gdb_send_error(connection, 01);
+		return ERROR_OK;
+	}
+
+	retval = gdb_read_memory(connection, buffer, addr, len);
+	if (retval != ERROR_OK) {
+		retval = gdb_error(connection, retval);
+		goto cleanup;
+	}
+
+	/* len * 2 : each byte may need escaping → 2 bytes max per input byte
+	* +1 : for 'b' prefix
+	* +1 : for null terminator */
+	char *out_buffer = malloc(len * 2 + 1 + 1);
+	if (!out_buffer) {
+		LOG_ERROR("Unable to allocate memory for output buffer");
+		gdb_send_error(connection, 01);
+		goto cleanup;
+	}
+	size_t pkt_len = escape_binary_data(buffer, out_buffer, len);
+	if (pkt_len < len || INT_MAX <= pkt_len) {
+		LOG_ERROR("Escape binary data failed: invalid output length %zu "
+				"(input: %" PRIu32 ", max: %d)", pkt_len, len, INT_MAX);
+		gdb_send_error(connection, ERANGE);
+	} else {
+		retval = gdb_put_packet(connection, out_buffer, pkt_len);
+	}
+
+	free(out_buffer);
+cleanup:
 	free(buffer);
 
 	return retval;
@@ -1931,6 +2041,61 @@ static __attribute__ ((format (PRINTF_ATTRIBUTE_FORMAT, 5, 6))) void xml_printf(
 	}
 }
 
+/* Escape the XML reserved characters and replace every byte that is not
+ * printable ASCII with '?'.
+ *
+ * Strings taken from target memory (e.g. RTOS thread names) or from the
+ * configuration must not be able to produce a malformed XML document: GDB
+ * discards such a document in its entirety, not just the offending element.
+ */
+static char *xml_escape_string(int *retval, const char *str)
+{
+	if (*retval != ERROR_OK)
+		return NULL;
+
+	/* Worst case every character expands to "&quot;" or "&apos;". */
+	char *out = malloc(strlen(str) * 6 + 1);
+	if (!out) {
+		*retval = ERROR_SERVER_REMOTE_CLOSED;
+		return NULL;
+	}
+
+	char *o = out;
+	for (const char *i = str; *i; i++) {
+		const char *esc;
+
+		switch (*i) {
+		case '&':
+			esc = "&amp;";
+			break;
+		case '<':
+			esc = "&lt;";
+			break;
+		case '>':
+			esc = "&gt;";
+			break;
+		case '"':
+			esc = "&quot;";
+			break;
+		case '\'':
+			esc = "&apos;";
+			break;
+		default:
+			/* Anything outside printable ASCII, including control
+			 * characters and non-ASCII bytes, is not guaranteed to
+			 * be valid XML character data. */
+			*o++ = (*i >= 0x20 && *i < 0x7f) ? *i : '?';
+			continue;
+		}
+
+		while (*esc)
+			*o++ = *esc++;
+	}
+	*o = '\0';
+
+	return out;
+}
+
 static int decode_xfer_read(char const *buf, char **annex, int *ofs, unsigned int *len)
 {
 	/* Locate the annex. */
@@ -2220,10 +2385,15 @@ static int gdb_generate_reg_type_description(struct target *target,
 								num_arch_defined_types);
 		}
 		/* <vector id="id" type="type" count="count"/> */
+		char *id = xml_escape_string(&retval, type->id);
+		char *type_id = xml_escape_string(&retval, type->reg_type_vector->type->id);
+
 		xml_printf(&retval, tdesc, pos, size,
 				"<vector id=\"%s\" type=\"%s\" count=\"%" PRIu32 "\"/>\n",
-				type->id, type->reg_type_vector->type->id,
-				type->reg_type_vector->count);
+				id, type_id, type->reg_type_vector->count);
+
+		free(id);
+		free(type_id);
 
 	} else if (type->type_class == REG_TYPE_CLASS_UNION) {
 		struct reg_data_type_union_field *field;
@@ -2243,15 +2413,25 @@ static int gdb_generate_reg_type_description(struct target *target,
 		/* <union id="id">
 		 *  <field name="name" type="type"/> ...
 		 * </union> */
+		char *id = xml_escape_string(&retval, type->id);
+
 		xml_printf(&retval, tdesc, pos, size,
 				"<union id=\"%s\">\n",
-				type->id);
+				id);
+
+		free(id);
 
 		field = type->reg_type_union->fields;
 		while (field) {
+			char *name = xml_escape_string(&retval, field->name);
+			char *type_id = xml_escape_string(&retval, field->type->id);
+
 			xml_printf(&retval, tdesc, pos, size,
 					"<field name=\"%s\" type=\"%s\"/>\n",
-					field->name, field->type->id);
+					name, type_id);
+
+			free(name);
+			free(type_id);
 
 			field = field->next;
 		}
@@ -2267,14 +2447,23 @@ static int gdb_generate_reg_type_description(struct target *target,
 			/* <struct id="id" size="size">
 			 *  <field name="name" start="start" end="end"/> ...
 			 * </struct> */
+			char *id = xml_escape_string(&retval, type->id);
+
 			xml_printf(&retval, tdesc, pos, size,
 					"<struct id=\"%s\" size=\"%" PRIu32 "\">\n",
-					type->id, type->reg_type_struct->size);
+					id, type->reg_type_struct->size);
+
+			free(id);
+
 			while (field) {
+				char *name = xml_escape_string(&retval, field->name);
+
 				xml_printf(&retval, tdesc, pos, size,
 						"<field name=\"%s\" start=\"%" PRIu32 "\" end=\"%" PRIu32 "\" type=\"%s\" />\n",
-						field->name, field->bitfield->start, field->bitfield->end,
+						name, field->bitfield->start, field->bitfield->end,
 						gdb_get_reg_type_name(field->bitfield->type));
+
+				free(name);
 
 				field = field->next;
 			}
@@ -2293,13 +2482,24 @@ static int gdb_generate_reg_type_description(struct target *target,
 			/* <struct id="id">
 			 *  <field name="name" type="type"/> ...
 			 * </struct> */
+			char *id = xml_escape_string(&retval, type->id);
+
 			xml_printf(&retval, tdesc, pos, size,
 					"<struct id=\"%s\">\n",
-					type->id);
+					id);
+
+			free(id);
+
 			while (field) {
+				char *name = xml_escape_string(&retval, field->name);
+				char *type_id = xml_escape_string(&retval, field->type->id);
+
 				xml_printf(&retval, tdesc, pos, size,
 						"<field name=\"%s\" type=\"%s\"/>\n",
-						field->name, field->type->id);
+						name, type_id);
+
+				free(name);
+				free(type_id);
 
 				field = field->next;
 			}
@@ -2312,17 +2512,25 @@ static int gdb_generate_reg_type_description(struct target *target,
 		/* <flags id="id" size="size">
 		 *  <field name="name" start="start" end="end"/> ...
 		 * </flags> */
+		char *id = xml_escape_string(&retval, type->id);
+
 		xml_printf(&retval, tdesc, pos, size,
 				"<flags id=\"%s\" size=\"%" PRIu32 "\">\n",
-				type->id, type->reg_type_flags->size);
+				id, type->reg_type_flags->size);
+
+		free(id);
 
 		struct reg_data_type_flags_field *field;
 		field = type->reg_type_flags->fields;
 		while (field) {
+			char *name = xml_escape_string(&retval, field->name);
+
 			xml_printf(&retval, tdesc, pos, size,
 					"<field name=\"%s\" start=\"%" PRIu32 "\" end=\"%" PRIu32 "\" type=\"%s\" />\n",
-					field->name, field->bitfield->start, field->bitfield->end,
+					name, field->bitfield->start, field->bitfield->end,
 					gdb_get_reg_type_name(field->bitfield->type));
+
+			free(name);
 
 			field = field->next;
 		}
@@ -2550,9 +2758,14 @@ static int gdb_generate_target_description(struct target *target, char **tdesc_o
 			int num_arch_defined_types = 0;
 
 			arch_defined_types = calloc(1, sizeof(char *));
+
+			char *feature_name = xml_escape_string(&retval, features[current_feature]);
+
 			xml_printf(&retval, &tdesc, &pos, &size,
 					"<feature name=\"%s\">\n",
-					features[current_feature]);
+					feature_name);
+
+			free(feature_name);
 
 			int i;
 			for (i = 0; i < reg_list_size; i++) {
@@ -2586,8 +2799,11 @@ static int gdb_generate_target_description(struct target *target, char **tdesc_o
 					type_str = "int";
 				}
 
+				char *reg_name = xml_escape_string(&retval, reg_list[i]->name);
+				char *reg_type = xml_escape_string(&retval, type_str);
+
 				xml_printf(&retval, &tdesc, &pos, &size,
-						"<reg name=\"%s\"", reg_list[i]->name);
+						"<reg name=\"%s\"", reg_name);
 				xml_printf(&retval, &tdesc, &pos, &size,
 						" bitsize=\"%" PRIu32 "\"", reg_list[i]->size);
 				xml_printf(&retval, &tdesc, &pos, &size,
@@ -2600,11 +2816,19 @@ static int gdb_generate_target_description(struct target *target, char **tdesc_o
 							" save-restore=\"no\"");
 
 				xml_printf(&retval, &tdesc, &pos, &size,
-						" type=\"%s\"", type_str);
+						" type=\"%s\"", reg_type);
 
-				if (reg_list[i]->group)
+				free(reg_name);
+				free(reg_type);
+
+				if (reg_list[i]->group) {
+					char *reg_group = xml_escape_string(&retval, reg_list[i]->group);
+
 					xml_printf(&retval, &tdesc, &pos, &size,
-							" group=\"%s\"", reg_list[i]->group);
+							" group=\"%s\"", reg_group);
+
+					free(reg_group);
+				}
 
 				xml_printf(&retval, &tdesc, &pos, &size,
 						"/>\n");
@@ -2751,26 +2975,39 @@ static int gdb_generate_thread_list(struct target *target, char **thread_list_ou
 			if (!thread_detail->exists)
 				continue;
 
+			/* The strings below are read from the target, so they
+			 * must be escaped before being put in the XML. */
+			char *name = NULL;
+			char *extra_info = NULL;
+
 			if (thread_detail->thread_name_str)
+				name = xml_escape_string(&retval, thread_detail->thread_name_str);
+
+			if (thread_detail->extra_info_str)
+				extra_info = xml_escape_string(&retval, thread_detail->extra_info_str);
+
+			if (name)
 				xml_printf(&retval, &thread_list, &pos, &size,
 					   "<thread id=\"%" PRIx64 "\" name=\"%s\">",
-					   thread_detail->threadid,
-					   thread_detail->thread_name_str);
+					   thread_detail->threadid, name);
 			else
 				xml_printf(&retval, &thread_list, &pos, &size,
 					   "<thread id=\"%" PRIx64 "\">", thread_detail->threadid);
 
-			if (thread_detail->thread_name_str)
+			if (name)
 				xml_printf(&retval, &thread_list, &pos, &size,
-					   "Name: %s", thread_detail->thread_name_str);
+					   "Name: %s", name);
 
-			if (thread_detail->extra_info_str) {
-				if (thread_detail->thread_name_str)
+			if (extra_info) {
+				if (name)
 					xml_printf(&retval, &thread_list, &pos, &size,
 						   ", ");
 				xml_printf(&retval, &thread_list, &pos, &size,
-					   "%s", thread_detail->extra_info_str);
+					   "%s", extra_info);
 			}
+
+			free(name);
+			free(extra_info);
 
 			xml_printf(&retval, &thread_list, &pos, &size,
 				   "</thread>\n");
@@ -2977,10 +3214,16 @@ static int gdb_query_packet(struct connection *connection,
 			&buffer,
 			&pos,
 			&size,
-			"PacketSize=%x;qXfer:memory-map:read%c;qXfer:features:read%c;qXfer:threads:read+;QStartNoAckMode+;vContSupported+",
+			"PacketSize=%x;"
+			"QStartNoAckMode+;"
+			"binary-upload+;"
+			"qXfer:features:read%c;"
+			"qXfer:memory-map:read%c;"
+			"qXfer:threads:read+;"
+			"vContSupported+",
 			GDB_BUFFER_SIZE,
-			(gdb_use_memory_map && (flash_get_bank_count() > 0)) ? '+' : '-',
-			gdb_target_desc_supported ? '+' : '-');
+			gdb_target_desc_supported ? '+' : '-',
+			(gdb_use_memory_map && (flash_get_bank_count() > 0)) ? '+' : '-');
 
 		if (retval != ERROR_OK) {
 			gdb_send_error(connection, 01);
@@ -3444,15 +3687,19 @@ static int gdb_v_packet(struct connection *connection,
 		 * end to be "block" aligned ... if padding is ever needed,
 		 * GDB will have become dangerously confused.
 		 */
-		result = flash_erase_address_range(target, false, addr,
-			length);
+		result = flash_erase_address_range(target, false, /* pad */
+						addr, length, true /* skip_banks_without_erase */);
 
 		/* perform any target specific operations after the erase */
 		target_call_event_callbacks(target,
 			TARGET_EVENT_GDB_FLASH_ERASE_END);
 
-		/* perform erase */
-		if (result != ERROR_OK) {
+		/* Perform erase.
+		 * If the driver does not support erase, we silently ignore it.
+		 * This is expected for non-flash NVM which does not require an erase
+		 * operation before programming.
+		 */
+		if (result != ERROR_OK && result != ERROR_FLASH_OPER_UNSUPPORTED) {
 			/* GDB doesn't evaluate the actual error number returned,
 			 * treat a failed erase as an I/O error
 			 */
@@ -3790,6 +4037,11 @@ static int gdb_input_inner(struct connection *connection)
 					retval = gdb_write_memory_binary_packet(connection, packet, packet_size);
 					gdb_con->output_flag = GDB_OUTPUT_NO;
 					break;
+				case 'x':
+					gdb_con->output_flag = GDB_OUTPUT_NOTIF;
+					retval = gdb_read_memory_packet_binary(connection, packet, packet_size);
+					gdb_con->output_flag = GDB_OUTPUT_NO;
+					break;
 				case 'k':
 					if (gdb_con->extended_protocol) {
 						gdb_con->attached = false;
@@ -3953,6 +4205,20 @@ static void gdb_keep_client_alive(struct connection *connection)
 	}
 }
 
+static COMMAND_HELPER(gdb_service_info, const struct service *service)
+{
+	struct gdb_service *gdb_service = service->priv;
+
+	char *cmd_name = tcl_escape_alloc(CMD_CTX->interp, gdb_service->target->cmd_name);
+	if (!cmd_name) {
+		LOG_ERROR("Unable to escape Tcl string");
+		return ERROR_FAIL;
+	}
+	command_print(cmd, "    target %s", cmd_name);
+	free(cmd_name);
+	return ERROR_OK;
+}
+
 static const struct service_driver gdb_service_driver = {
 	.name = "gdb",
 	.new_connection_during_keep_alive_handler = NULL,
@@ -3960,6 +4226,7 @@ static const struct service_driver gdb_service_driver = {
 	.input_handler = gdb_input,
 	.connection_closed_handler = gdb_connection_closed,
 	.keep_client_alive_handler = gdb_keep_client_alive,
+	.service_info_handler = gdb_service_info,
 };
 
 static int gdb_target_start(struct target *target, const char *port)
