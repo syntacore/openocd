@@ -396,6 +396,7 @@ static inline riscv_reg_t riscv_priv_mode_to_prv(enum riscv_priv_mode mode)
 struct riscv_private_config {
 	bool dcsr_ebreak_fields[N_RISCV_MODE];
 	bool dcsr_cetrig;
+	bool detect_misa;
 };
 
 static inline struct riscv_private_config
@@ -518,6 +519,8 @@ unsigned int riscv_xlen_nonconst(struct target *target);
 unsigned int riscv_data_bits(struct target *target);
 
 /*** RISC-V Interface ***/
+
+int riscv_extension_enabled(struct target *target, char letter, bool *is_enabled);
 
 bool riscv_supports_extension(const struct target *target, char letter);
 

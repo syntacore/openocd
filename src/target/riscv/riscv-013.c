@@ -3295,15 +3295,25 @@ static int set_mpp_mpv(struct target *target, riscv_reg_t *mstatus,
 static int restore_mpp_mpv(struct target *target, riscv_reg_t mstatus,
 		riscv_reg_t mstatus_old, riscv_reg_t mstatush, riscv_reg_t mstatush_old)
 {
-	if (mstatus != mstatus_old &&
-			riscv_reg_set(target, GDB_REGNO_MSTATUS, mstatus_old) != ERROR_OK)
-		return ERROR_FAIL;
+	int result = ERROR_OK;
 
-	if (mstatush != mstatush_old &&
-			riscv_reg_set(target, GDB_REGNO_MSTATUSH, mstatush_old) != ERROR_OK)
-		return ERROR_FAIL;
+	if (mstatus != mstatus_old) {
+		int retval = riscv_reg_set(target, GDB_REGNO_MSTATUS, mstatus_old);
+		if (retval != ERROR_OK)
+			result = retval;
+	}
 
-	return ERROR_OK;
+	if (mstatush != mstatush_old) {
+		int retval = riscv_reg_set(target, GDB_REGNO_MSTATUSH, mstatush_old);
+		if (retval != ERROR_OK && result == ERROR_OK)
+			result = retval;
+	}
+
+	if (result != ERROR_OK)
+		LOG_TARGET_ERROR(target, "Failed to restore mstatus; the hart is left "
+				"with a modified privilege state.");
+
+	return result;
 }
 
 /* TODO: return struct mem_access_result */
@@ -3338,14 +3348,32 @@ static int modify_privilege_progbuf(struct target *target, riscv_reg_t *mstatus,
 static int restore_privilege_progbuf(struct target *target, riscv_reg_t mstatus, riscv_reg_t mstatus_old,
 		riscv_reg_t mstatush, riscv_reg_t mstatush_old, riscv_reg_t dcsr, riscv_reg_t dcsr_old)
 {
-	if (restore_mpp_mpv(target, mstatus, mstatus_old, mstatush, mstatush_old) != ERROR_OK)
-		return ERROR_FAIL;
+	int result = restore_mpp_mpv(target, mstatus, mstatus_old, mstatush, mstatush_old);
 
-	if (dcsr != dcsr_old &&
-			riscv_reg_set(target, GDB_REGNO_DCSR, dcsr_old) != ERROR_OK)
-		return ERROR_FAIL;
+	if (dcsr != dcsr_old) {
+		int retval = riscv_reg_set(target, GDB_REGNO_DCSR, dcsr_old);
+		if (retval != ERROR_OK && result == ERROR_OK)
+			result = retval;
+	}
 
-	return ERROR_OK;
+	return result;
+}
+
+static int modify_privilege_abstract(struct target *target,
+		riscv_reg_t *mstatus, riscv_reg_t *mstatus_old, riscv_reg_t *mstatush,
+		riscv_reg_t *mstatush_old, enum riscv_priv_mode mode)
+{
+	assert(mstatus);
+	assert(mstatus_old);
+	assert(mstatush);
+	assert(mstatush_old);
+
+	/* With aamvirtual clear the command does not translate, so a physical
+	 * access needs no mstatus at all. */
+	if (mode == RISCV_MODE_M)
+		return ERROR_OK;
+
+	return set_mpp_mpv(target, mstatus, mstatus_old, mstatush, mstatush_old, mode);
 }
 
 static int read_memory_bus_v0(struct target *target, const struct riscv_mem_access_args args)
@@ -3846,12 +3874,6 @@ mem_should_skip_abstract(struct target *target, const struct riscv_mem_access_ar
 
 	const bool is_read = riscv_mem_access_is_read(args);
 	const char *const access_type = is_read ? "read" : "write";
-	if (args.mode != RISCV_MODE_M) {
-		/* Temporary, until aamvirtual support lands. */
-		LOG_TARGET_DEBUG(target, "Skipping mem %s via abstract access - "
-				"virtual access (aamvirtual) not implemented yet", access_type);
-		return mem_access_result(MEM_ACCESS_SKIPPED_NO_HW_TRANSLATION);
-	}
 	if (args.size > 8) {
 		/* TODO: Add 128b support if it's ever used. Involves modifying
 				 read/write_abstract_arg() to work on two 64b values. */
@@ -3889,8 +3911,9 @@ read_memory_abstract(struct target *target, const struct riscv_mem_access_args a
 
 	/* Convert the size (bytes) to width (bits) */
 	unsigned int width = args.size << 3;
+	bool aamvirtual = args.mode != RISCV_MODE_M;
 
-	uint32_t command = access_memory_command(target, /* virtual = */ false,
+	uint32_t command = access_memory_command(target, aamvirtual,
 			width, /* postincrement = */ true, /* is_write = */ false);
 	bool use_aampostincrement = !is_command_unsupported(target, command);
 	if (!use_aampostincrement)
@@ -3899,7 +3922,7 @@ read_memory_abstract(struct target *target, const struct riscv_mem_access_args a
 		 * So try aampostincrement=0 right away.
 		 *
 		 * TODO: check if new command is supported  */
-		command = access_memory_command(target, /* virtual = */ false,
+		command = access_memory_command(target, aamvirtual,
 				width, /* postincrement = */ false, /* is_write = */ false);
 
 	/* Execute the reads */
@@ -3926,7 +3949,7 @@ read_memory_abstract(struct target *target, const struct riscv_mem_access_args a
 			LOG_TARGET_DEBUG(target, "Trying the same abstract memory "
 					"read command, but without aampostincrement");
 			use_aampostincrement = false;
-			command = access_memory_command(target, /* virtual = */ false,
+			command = access_memory_command(target, aamvirtual,
 					width, /* postincrement = */ false, /* is_write = */ false);
 			result = riscv013_execute_abstract_command(target, command, &cmderr);
 		}
@@ -3966,8 +3989,9 @@ write_memory_abstract(struct target *target, const struct riscv_mem_access_args 
 
 	/* Convert the size (bytes) to width (bits) */
 	unsigned int width = args.size << 3;
+	bool aamvirtual = args.mode != RISCV_MODE_M;
 
-	uint32_t command = access_memory_command(target, /* virtual = */ false,
+	uint32_t command = access_memory_command(target, aamvirtual,
 			width, /* postincrement = */ true, /* is_write = */ true);
 	bool use_aampostincrement = !is_command_unsupported(target, command);
 	if (!use_aampostincrement)
@@ -3976,7 +4000,7 @@ write_memory_abstract(struct target *target, const struct riscv_mem_access_args 
 		 * So try aampostincrement=0 right away.
 		 *
 		 * TODO: check if new command is supported  */
-		command = access_memory_command(target, /* virtual = */ false,
+		command = access_memory_command(target, aamvirtual,
 				width, /* postincrement = */ false, /* is_write = */ true);
 
 	/* Execute the writes */
@@ -4009,7 +4033,7 @@ write_memory_abstract(struct target *target, const struct riscv_mem_access_args 
 			LOG_TARGET_DEBUG(target, "Trying the same abstract memory "
 					"write command, but without aampostincrement");
 			use_aampostincrement = false;
-			command = access_memory_command(target, /* virtual = */ false,
+			command = access_memory_command(target, aamvirtual,
 					width, /* postincrement = */ false, /* is_write = */ true);
 			result = riscv013_execute_abstract_command(target, command, &cmderr);
 		}
@@ -4589,13 +4613,14 @@ access_memory_progbuf(struct target *target, const struct riscv_mem_access_args 
 	riscv_reg_t mstatush_old = 0;
 	riscv_reg_t dcsr = 0;
 	riscv_reg_t dcsr_old = 0;
+	struct mem_access_result result = mem_access_result(MEM_ACCESS_SKIPPED_PRIV_MOD_FAILED);
 	if (modify_privilege_progbuf(target, &mstatus, &mstatus_old, &mstatush,
-			&mstatush_old, &dcsr, &dcsr_old, args.mode) != ERROR_OK)
-		return mem_access_result(MEM_ACCESS_SKIPPED_PRIV_MOD_FAILED);
-
-	struct mem_access_result result = is_read ?
-			read_memory_progbuf(target, args) :
-			write_memory_progbuf(target, args);
+			&mstatush_old, &dcsr, &dcsr_old, args.mode) == ERROR_OK) {
+		if (is_read)
+			result = read_memory_progbuf(target, args);
+		else
+			result = write_memory_progbuf(target, args);
+	}
 
 	if (restore_privilege_progbuf(target, mstatus, mstatus_old,
 			mstatush, mstatush_old, dcsr, dcsr_old) != ERROR_OK)
@@ -4652,8 +4677,24 @@ access_memory_abstract(struct target *target, const struct riscv_mem_access_args
 			TARGET_PRIxADDR, access_type, args.count,
 			args.size, args.address);
 
-	return is_read ? read_memory_abstract(target, args) :
-			write_memory_abstract(target, args);
+	riscv_reg_t mstatus = 0;
+	riscv_reg_t mstatus_old = 0;
+	riscv_reg_t mstatush = 0;
+	riscv_reg_t mstatush_old = 0;
+	struct mem_access_result result = mem_access_result(MEM_ACCESS_SKIPPED_PRIV_MOD_FAILED);
+	if (modify_privilege_abstract(target, &mstatus, &mstatus_old,
+			&mstatush, &mstatush_old, args.mode) == ERROR_OK) {
+		if (is_read)
+			result = read_memory_abstract(target, args);
+		else
+			result = write_memory_abstract(target, args);
+	}
+
+	if (restore_mpp_mpv(target, mstatus, mstatus_old,
+			mstatush, mstatush_old) != ERROR_OK)
+		return mem_access_result(MEM_ACCESS_FAILED_PRIV_MOD_FAILED);
+
+	return result;
 }
 
 static int
