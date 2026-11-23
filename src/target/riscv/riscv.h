@@ -418,6 +418,7 @@ typedef struct {
 	const char *name;
 	int level;
 	unsigned int va_bits;
+	bool g_stage;
 	/* log2(PTESIZE) */
 	unsigned int pte_shift;
 	unsigned int vpn_shift[PG_MAX_LEVEL];

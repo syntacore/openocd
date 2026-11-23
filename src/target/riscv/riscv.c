@@ -196,6 +196,7 @@ static enum {
 static const virt2phys_info_t sv32 = {
 	.name = "Sv32",
 	.va_bits = 32,
+	.g_stage = false,
 	.level = 2,
 	.pte_shift = 2,
 	.vpn_shift = {12, 22},
@@ -209,6 +210,7 @@ static const virt2phys_info_t sv32 = {
 static const virt2phys_info_t sv32x4 = {
 	.name = "Sv32x4",
 	.va_bits = 34,
+	.g_stage = true,
 	.level = 2,
 	.pte_shift = 2,
 	.vpn_shift = {12, 22},
@@ -222,6 +224,7 @@ static const virt2phys_info_t sv32x4 = {
 static const virt2phys_info_t sv39 = {
 	.name = "Sv39",
 	.va_bits = 39,
+	.g_stage = false,
 	.level = 3,
 	.pte_shift = 3,
 	.vpn_shift = {12, 21, 30},
@@ -235,6 +238,7 @@ static const virt2phys_info_t sv39 = {
 static const virt2phys_info_t sv39x4 = {
 	.name = "Sv39x4",
 	.va_bits = 41,
+	.g_stage = true,
 	.level = 3,
 	.pte_shift = 3,
 	.vpn_shift = {12, 21, 30},
@@ -248,6 +252,7 @@ static const virt2phys_info_t sv39x4 = {
 static const virt2phys_info_t sv48 = {
 	.name = "Sv48",
 	.va_bits = 48,
+	.g_stage = false,
 	.level = 4,
 	.pte_shift = 3,
 	.vpn_shift = {12, 21, 30, 39},
@@ -261,6 +266,7 @@ static const virt2phys_info_t sv48 = {
 static const virt2phys_info_t sv48x4 = {
 	.name = "Sv48x4",
 	.va_bits = 50,
+	.g_stage = true,
 	.level = 4,
 	.pte_shift = 3,
 	.vpn_shift = {12, 21, 30, 39},
@@ -274,6 +280,7 @@ static const virt2phys_info_t sv48x4 = {
 static const virt2phys_info_t sv57 = {
 	.name = "Sv57",
 	.va_bits = 57,
+	.g_stage = false,
 	.level = 5,
 	.pte_shift = 3,
 	.vpn_shift = {12, 21, 30, 39, 48},
@@ -287,6 +294,7 @@ static const virt2phys_info_t sv57 = {
 static const virt2phys_info_t sv57x4 = {
 	.name = "Sv57x4",
 	.va_bits = 59,
+	.g_stage = true,
 	.level = 5,
 	.pte_shift = 3,
 	.vpn_shift = {12, 21, 30, 39, 48},
@@ -3290,19 +3298,27 @@ static int riscv_address_translate(struct target *target,
 		target_addr_t virtual, target_addr_t *physical)
 {
 	RISCV_INFO(r);
-	unsigned int xlen = riscv_xlen(target);
 
 	LOG_TARGET_DEBUG(target, "mode=%s; ppn=0x%" TARGET_PRIxADDR "; virtual=0x%" TARGET_PRIxADDR,
 		info->name, ppn, virtual);
 
-	/* verify bits xlen-1:va_bits-1 are all equal */
-	assert(xlen >= info->va_bits);
-	target_addr_t mask = ((target_addr_t)1 << (xlen - (info->va_bits - 1))) - 1;
-	target_addr_t masked_msbs = (virtual >> (info->va_bits - 1)) & mask;
-	if (masked_msbs != 0 && masked_msbs != mask) {
-		LOG_TARGET_ERROR(target, "Virtual address 0x%" TARGET_PRIxADDR " is not sign-extended "
-				"for %s mode.", virtual, info->name);
-		return ERROR_FAIL;
+	if (info->g_stage) {
+		if (virtual >> info->va_bits) {
+			LOG_TARGET_ERROR(target, "Guest physical address 0x%" TARGET_PRIxADDR
+					" is not zero-extended for %s mode.", virtual, info->name);
+			return ERROR_FAIL;
+		}
+	} else {
+		/* Verify bits xlen-1:va_bits-1 are all equal. */
+		const unsigned int xlen = riscv_xlen(target);
+		assert(xlen >= info->va_bits);
+		const target_addr_t mask = ((target_addr_t)1 << (xlen - (info->va_bits - 1))) - 1;
+		const target_addr_t masked_msbs = (virtual >> (info->va_bits - 1)) & mask;
+		if (masked_msbs != 0 && masked_msbs != mask) {
+			LOG_TARGET_ERROR(target, "Virtual address 0x%" TARGET_PRIxADDR
+					" is not sign-extended for %s mode.", virtual, info->name);
+			return ERROR_FAIL;
+		}
 	}
 
 	uint64_t pte = 0;
