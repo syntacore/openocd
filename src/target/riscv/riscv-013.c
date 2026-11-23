@@ -4677,6 +4677,9 @@ access_memory_abstract(struct target *target, const struct riscv_mem_access_args
 			TARGET_PRIxADDR, access_type, args.count,
 			args.size, args.address);
 
+	if (dm013_select_target(target) != ERROR_OK)
+		return mem_access_result(MEM_ACCESS_SKIPPED_TARGET_SELECT_FAILED);
+
 	riscv_reg_t mstatus = 0;
 	riscv_reg_t mstatus_old = 0;
 	riscv_reg_t mstatush = 0;
