@@ -3,11 +3,69 @@
 # A collection of scripts to manipulate RISC-V cores using low-level JTAG
 # commands
 #
-# Copyright (c) 2023-2025, Syntacore LLC
+# Call ocdjtag_riscv_update_taps_info before using the library to discover
+# TAPs and disable polling. Keep polling off during low-level access.
+# Refresh explicitly after topology changes or device reconfiguration.
+#
+# Copyright (c) 2023-2026, Syntacore LLC
 
 set __JTAG_TAPS_INFO [dict create]
 
 namespace eval __SC_JTAGLIB_INTERNAL {
+    # JTAG instructions and DTM control fields. VALUE_MASK is unshifted.
+    variable IR_DTMCS 0x10
+    variable IR_DMI 0x11
+    variable DTMCS_DMIRESET 0x10000
+    variable DTMCS_IDLE_SHIFT 12
+    variable DTMCS_IDLE_VALUE_MASK 0x7
+    variable DTMCS_DMISTAT_SHIFT 10
+    variable DTMCS_DMISTAT_VALUE_MASK 0x3
+    variable DTMCS_ABITS_SHIFT 4
+    variable DTMCS_ABITS_VALUE_MASK 0x3f
+    variable DTMCS_VERSION_MASK 0xf
+
+    # DMI scan layout: op/status, 32-bit data, then the DTM-sized address.
+    variable DMI_OP_MASK 0x3
+    variable DMI_DATA_SHIFT 2
+    variable DMI_DATA_MASK 0xffffffff
+    variable DMI_ADDRESS_SHIFT 34
+    variable DMI_NOP 0
+    variable DMI_READ 1
+    variable DMI_WRITE 2
+    variable DMI_SUCCESS 0
+    variable DMI_FAILED 2
+    variable DMI_BUSY 3
+
+    # DMI addresses of the SBA registers.
+    variable DM_SBCS       0x38
+    variable DM_SBADDRESS0 0x39
+    variable DM_SBADDRESS1 0x3a
+    variable DM_SBDATA0    0x3c
+    variable DM_SBDATA1    0x3d
+
+    # SBCS field positions and unshifted masks, plus writable control bits.
+    variable SBCS_SBVERSION_SHIFT 29
+    variable SBCS_SBVERSION_VALUE_MASK 0x7
+    variable SBCS_SBACCESS_SHIFT 17
+    variable SBCS_SBACCESS_VALUE_MASK 0x7
+    variable SBCS_SBERROR_SHIFT 12
+    variable SBCS_SBERROR_VALUE_MASK 0x7
+    variable SBCS_SBASIZE_SHIFT 5
+    variable SBCS_SBASIZE_VALUE_MASK 0x7f
+    variable SBCS_SBREADONADDR 0x100000
+    # Write-one-to-clear bits: sbbusyerror and every sberror bit.
+    variable SBCS_ERROR_CLEAR 0x407000
+    # Unsigned SBA addresses/values are assembled as two 32-bit words.
+    variable SBA_WORD_MASK 0xffffffff
+
+    proc sc_jtaglib_get_tap_info { tap_num } {
+        set taps_info [ocdjtag_riscv_get_taps_info]
+        if {![dict exists $taps_info $tap_num]} {
+            error "TAP $tap_num is not present in cached TAP information"
+        }
+        return [dict get $taps_info $tap_num]
+    }
+
     proc sc_jtaglib_verbose { message { level 2 } } {
         if {[debug_level] >= $level} {
             echo $message
@@ -20,12 +78,6 @@ namespace eval __SC_JTAGLIB_INTERNAL {
         return 1000
     }
 
-    proc sc_jtaglib_get_dmi_init_delay {} {
-        set dmi_delay 0
-        # return initial number of extra cycles
-        return $dmi_delay
-    }
-
     proc sc_jtaglib_increase_dmi_busy_delay { current_delay } {
         return [expr {($current_delay / 10) + 1 + $current_delay}]
     }
@@ -35,44 +87,263 @@ namespace eval __SC_JTAGLIB_INTERNAL {
     }
 
     proc sc_jtaglib_clear_sticky { tap_name } {
-        set dtmcs_reg 0x10
-        irscan $tap_name $dtmcs_reg
+        variable IR_DTMCS
+        variable DTMCS_DMIRESET
+        irscan $tap_name $IR_DTMCS
 
-        set hex_dtmcs_bitval 0x[format %x [expr {1 << 16}]]
-        drscan $tap_name 32 $hex_dtmcs_bitval
+        drscan $tap_name 32 $DTMCS_DMIRESET
     }
 
-    proc sc_jtaglib_dmi_scan_timeout { tap_name dmi_size hex_dmi_val } {
-        set dmi_busy_delay [sc_jtaglib_get_dmi_init_delay]
+    proc sc_jtaglib_dmi_scan_timeout { tap_name dmi_size hex_dmi_val dtmcs_idle } {
+        variable IR_DMI
+        variable DMI_OP_MASK
+        variable DMI_NOP
+        variable DMI_SUCCESS
+        variable DMI_BUSY
+        variable DMI_FAILED
 
+        set dmi_busy_delay $dtmcs_idle
         set timeout_ms [sc_jtaglib_get_op_latency]
-
-        set start [clock milliseconds]
-        set cur $start
-
-        set dmi_reg 0x11
-        irscan $tap_name $dmi_reg
-
-        while {($cur - $start) < $timeout_ms} {
-            set res 0x[drscan $tap_name $dmi_size $hex_dmi_val]
-            sc_jtaglib_exec_runtest $dmi_busy_delay
-
-            # if "op" field is 0, operation completed successfully, in other cases we should
-            # clear sticky bit and retry operation
-            if {[expr {$res & 0x3}] == 0} {
-                return $res
-            }
-
-            sc_jtaglib_clear_sticky $tap_name
-
-            set dmi_busy_delay [sc_jtaglib_increase_dmi_busy_delay $dmi_busy_delay]
-
-            irscan $tap_name $dmi_reg
-
-            set cur [clock milliseconds]
+        set start_time [clock milliseconds]
+        set current_time $start_time
+        set scan_value $hex_dmi_val
+        set phase submission
+        if {($hex_dmi_val & $DMI_OP_MASK) == $DMI_NOP} {
+            # A caller-supplied NOP only waits for the transport to become idle.
+            set phase completion
         }
 
-        error "dmi_scan_timeout->Timed out"
+        irscan $tap_name $IR_DMI
+        while {1} {
+            if {($current_time - $start_time) >= $timeout_ms} {
+                error "Timed out during $phase"
+            }
+            # Wait before Capture-DR, also after clearing sticky BUSY.
+            sc_jtaglib_exec_runtest $dmi_busy_delay
+            set res [format 0x%s [drscan $tap_name $dmi_size $scan_value]]
+            set status [expr {$res & $DMI_OP_MASK}]
+            switch -- $status \
+                $DMI_SUCCESS {
+                    if {$phase eq "completion"} {
+                        break
+                    }
+                    # The returned status belongs to the previous request.
+                    # Our request has just been accepted. Send NOPs to collect
+                    # its result without submitting it again.
+                    set phase completion
+                    set scan_value $DMI_NOP
+                } \
+                $DMI_BUSY {
+                    # The DTM ignored this scan's request. Clear BUSY without
+                    # cancelling outstanding work. Retry an ignored submission;
+                    # after acceptance, continue polling with NOPs.
+                    sc_jtaglib_clear_sticky $tap_name
+                    set dmi_busy_delay \
+                        [sc_jtaglib_increase_dmi_busy_delay $dmi_busy_delay]
+                    irscan $tap_name $IR_DMI
+                } \
+                $DMI_FAILED {
+                    sc_jtaglib_clear_sticky $tap_name
+                    error "DMI operation failed (status $status) during $phase"
+                } \
+                default {
+                    error "Reserved DMI status $status during $phase"
+                }
+            set current_time [clock milliseconds]
+        }
+        return $res
+    }
+
+    # Parse unsigned 64-bit inputs digit by digit as two 32-bit words.
+    # Converting the whole input first can turn both UINT64_MAX and overflowing
+    # values into -1, losing the information needed to reject out-of-range input.
+    proc sc_jtaglib_sba_words { value bits name } {
+        variable SBA_WORD_MASK
+
+        if {![string is integer -strict $bits] || $bits < 1 || $bits > 64} {
+            error "SBA bit width must be between 1 and 64"
+        }
+        set digits [string tolower [string trim $value]]
+        set base [switch -- [string range $digits 0 1] {
+            0x      {expr 16}
+            0b      {expr 2}
+            default {expr 10}
+        }]
+        if {$base != 10} {
+            set digits [string range $digits 2 end]
+        }
+        if {$digits eq ""} {
+            error "SBA $name must be an unsigned integer: \"$value\""
+        }
+
+        set low_limit $SBA_WORD_MASK
+        set high_limit 0
+        if {$bits <= 32} {
+            set low_limit [expr {(1 << $bits) - 1}]
+        } else {
+            set high_limit [expr {(1 << ($bits - 32)) - 1}]
+        }
+        set low 0
+        set high 0
+        for {set i 0} {$i < [string length $digits]} {incr i} {
+            set digit [string first [string index $digits $i] 0123456789abcdef]
+            if {$digit < 0 || $digit >= $base} {
+                error "SBA $name must be an unsigned integer: \"$value\""
+            }
+            # Even in base 16, these intermediates use at most 36 bits and fit
+            # in signed 64-bit Jim integers (long long, also on 32-bit hosts).
+            set word [expr {$low * $base + $digit}]
+            set low [expr {$word & $SBA_WORD_MASK}]
+            set high [expr {$high * $base + ($word >> 32)}]
+            if {$high > $high_limit || $low > $low_limit} {
+                error "SBA $name does not fit in $bits bits: \"$value\""
+            }
+        }
+        return [list $low $high]
+    }
+
+    proc sc_jtaglib_sba_validate { sbcs address size } {
+        set version [dict get $sbcs sbversion]
+        if {$version != 1} {
+            error "Unsupported SBA version $version; expected 1"
+        }
+        set address_bits [dict get $sbcs sbasize]
+        if {$address_bits == 0} {
+            error "SBA is not available (sbasize=0)"
+        }
+        if {$address_bits > 64} {
+            error "Unsupported SBA address width $address_bits; maximum is 64 bits"
+        }
+        if {![string is integer -strict $size] ||
+            ($size != 8 && $size != 16 && $size != 32 && $size != 64)} {
+            error "SBA access size must be 8, 16, 32, or 64 bits: \"$size\""
+        }
+        # Capability keys use decimal suffixes, even for sizes such as 0x20.
+        set size [format %d $size]
+        if {![dict get $sbcs sbaccess$size]} {
+            error "SBA does not support native $size-bit access"
+        }
+        set words [sc_jtaglib_sba_words $address $address_bits address]
+        if {([lindex $words 0] & ($size / 8 - 1)) != 0} {
+            error "SBA address \"$address\" is not aligned for $size-bit access"
+        }
+        # An aligned transfer fits a power-of-two address space if its start
+        # fits and the space contains at least one whole transfer.
+        if {$address_bits < [lsearch -exact {8 16 32 64} $size]} {
+            error "SBA address space is too small for $size-bit access"
+        }
+        return $words
+    }
+
+    proc sc_jtaglib_sba_wait_idle { tap_num } {
+        set timeout_ms [sc_jtaglib_get_op_latency]
+        set start_time [clock milliseconds]
+        while {1} {
+            set sbcs [ocdjtag_riscv_get_sbcs $tap_num]
+            if {![dict get $sbcs sbbusy]} {
+                return $sbcs
+            }
+            if {([clock milliseconds] - $start_time) >= $timeout_ms} {
+                error "SBA TAP $tap_num: timed out waiting for sbbusy to clear"
+            }
+        }
+    }
+
+    proc sc_jtaglib_sba_check_errors { sbcs } {
+        set busy_error [dict get $sbcs sbbusyerror]
+        set bus_error [dict get $sbcs sberror]
+        if {!$busy_error && !$bus_error} {
+            return
+        }
+        switch $bus_error {
+            0 {set description "no bus error"}
+            1 {set description "timeout"}
+            2 {set description "bad address"}
+            3 {set description "misaligned access"}
+            4 {set description "unsupported access size"}
+            7 {set description "other bus error"}
+            default {set description "reserved error code"}
+        }
+        if {$busy_error} {
+            append description "; access while busy"
+        }
+        error "SBA error: sbbusyerror=$busy_error, sberror=$bus_error ($description)"
+    }
+
+    proc sc_jtaglib_sba_clear_errors { tap_num sbcs } {
+        variable DM_SBCS
+        variable SBCS_SBACCESS_SHIFT
+        variable SBCS_ERROR_CLEAR
+
+        if {[dict get $sbcs sbbusy]} {
+            error "SBA TAP $tap_num: cannot clear errors while sbbusy is set"
+        }
+        if {![dict get $sbcs sbbusyerror] && ![dict get $sbcs sberror]} {
+            return $sbcs
+        }
+        # Preserve the access size, but disable read triggers/autoincrement.
+        # This prepares for a new request; it never retries the failed access.
+        set control [expr {
+            ([dict get $sbcs sbaccess] << $SBCS_SBACCESS_SHIFT) |
+            $SBCS_ERROR_CLEAR
+        }]
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBCS $control
+        set sbcs [sc_jtaglib_sba_wait_idle $tap_num]
+        sc_jtaglib_sba_check_errors $sbcs
+        return $sbcs
+    }
+
+    # Configure one validated native transfer. Only reads use read-on-address;
+    # neither direction uses read-on-data or autoincrement.
+    proc sc_jtaglib_sba_configure { tap_num size op } {
+        variable DM_SBCS
+        variable SBCS_SBACCESS_SHIFT
+        variable SBCS_SBREADONADDR
+
+        set access [lsearch -exact {8 16 32 64} [format %d $size]]
+        set control [expr {$access << $SBCS_SBACCESS_SHIFT}]
+        if {$op eq "read"} {
+            set control [expr {$control | $SBCS_SBREADONADDR}]
+        }
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBCS $control
+    }
+
+    # Program the upper word, if implemented, before the low word, which may
+    # trigger a read. The caller has validated the DM's 1-64-bit address width.
+    proc sc_jtaglib_sba_set_address { tap_num address_bits words } {
+        variable DM_SBADDRESS0
+        variable DM_SBADDRESS1
+
+        if {$address_bits > 32} {
+            ocdjtag_riscv_dmi_write $tap_num $DM_SBADDRESS1 [lindex $words 1]
+        }
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBADDRESS0 [lindex $words 0]
+    }
+
+    # Collect completed data as two words. Narrow-access masking and display
+    # formatting belong to the caller; unused bits may contain stale data.
+    proc sc_jtaglib_sba_read_data { tap_num size } {
+        variable DM_SBDATA0
+        variable DM_SBDATA1
+
+        set high 0
+        if {$size == 64} {
+            set high [ocdjtag_riscv_dmi_read $tap_num $DM_SBDATA1]
+        }
+        set low [ocdjtag_riscv_dmi_read $tap_num $DM_SBDATA0]
+        return [list $low $high]
+    }
+
+    # Stage validated data before writing the low word, which starts the bus
+    # transfer. A failure leaves recovery to the caller; never repeat a write.
+    proc sc_jtaglib_sba_write_data { tap_num size words } {
+        variable DM_SBDATA0
+        variable DM_SBDATA1
+
+        if {$size == 64} {
+            ocdjtag_riscv_dmi_write $tap_num $DM_SBDATA1 [lindex $words 1]
+        }
+        ocdjtag_riscv_dmi_write $tap_num $DM_SBDATA0 [lindex $words 0]
     }
 
     proc sc_jtaglib_get_tap_data_from_str { str } {
@@ -145,16 +416,34 @@ namespace eval __SC_JTAGLIB_INTERNAL {
     }
 
     proc sc_jtaglib_get_dtmcs_by_name { tap_name } {
-        set dtmcs_reg 0x10
-        irscan $tap_name $dtmcs_reg
-        set dtmcs_bitval 0x[drscan $tap_name 32 0x0]
+        variable IR_DTMCS
+        variable DTMCS_DMIRESET
+        variable DTMCS_IDLE_SHIFT
+        variable DTMCS_IDLE_VALUE_MASK
+        variable DTMCS_DMISTAT_SHIFT
+        variable DTMCS_DMISTAT_VALUE_MASK
+        variable DTMCS_ABITS_SHIFT
+        variable DTMCS_ABITS_VALUE_MASK
+        variable DTMCS_VERSION_MASK
+
+        irscan $tap_name $IR_DTMCS
+        set dtmcs_bitval [format 0x%s [drscan $tap_name 32 0x0]]
 
         return [dict create \
-            dmireset [expr {($dtmcs_bitval >> 16) & 0x1}] \
-            idle     [expr {($dtmcs_bitval >> 12) & 0x7}] \
-            dmistat  [expr {($dtmcs_bitval >> 10) & 0x3}] \
-            abits    [expr {($dtmcs_bitval >> 4)  & 0x3f}] \
-            version  [expr {($dtmcs_bitval) & 0xf}] \
+            dmireset [expr {($dtmcs_bitval & $DTMCS_DMIRESET) != 0}] \
+            idle     [expr {
+                ($dtmcs_bitval >> $DTMCS_IDLE_SHIFT) &
+                $DTMCS_IDLE_VALUE_MASK
+            }] \
+            dmistat  [expr {
+                ($dtmcs_bitval >> $DTMCS_DMISTAT_SHIFT) &
+                $DTMCS_DMISTAT_VALUE_MASK
+            }] \
+            abits    [expr {
+                ($dtmcs_bitval >> $DTMCS_ABITS_SHIFT) &
+                $DTMCS_ABITS_VALUE_MASK
+            }] \
+            version  [expr {$dtmcs_bitval & $DTMCS_VERSION_MASK}] \
             is_zero  [expr {$dtmcs_bitval == 0}] \
         ]
         # is_zero is not a field of register, it's created just for using in examine_hart function
@@ -233,39 +522,54 @@ namespace eval __SC_JTAGLIB_INTERNAL {
     #end of list of copies of openocd C functions
 
     proc sc_jtaglib_get_aarsize { tap_num } {
-        set aarsize 3
+        set xlen [ocdjtag_riscv_get_xlen $tap_num]
+        return [expr {$xlen == 32 ? 2 : 3}]
+    }
 
-        if {[catch {sc_jtaglib_register_read_abstract $tap_num 8 64} result]} {
-            set aarsize 2
-            ocdjtag_riscv_clear_cmderr $tap_num
+    proc sc_jtaglib_wait_abstractcs { tap_num } {
+        set abstractcs [ocdjtag_riscv_get_abstractcs $tap_num]
+        set timeout_ms [sc_jtaglib_get_op_latency]
+        set start_time [clock milliseconds]
+        set current_time $start_time
+
+        while {[dict get $abstractcs busy] && ($current_time - $start_time < $timeout_ms)} {
+            set abstractcs [ocdjtag_riscv_get_abstractcs $tap_num]
+            set current_time [clock milliseconds]
         }
 
-        return $aarsize
+        if {($current_time - $start_time) >= $timeout_ms} {
+            error "check_cmderr->Timed out during running abstract command"
+        }
+        return $abstractcs
     }
 }
 
-# in case of timeout this function return value with all bits set to 1
+# Wait for DMI completion. Transport failures and timeouts raise Tcl errors.
 proc ocdjtag_riscv_dmi_scan { tap_num address data op } {
-    ocdjtag_riscv_update_taps_info
-    global __JTAG_TAPS_INFO
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_ADDRESS_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_DATA_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_NOP
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_READ
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_WRITE
 
-    set tap_name [dict get $__JTAG_TAPS_INFO $tap_num name]
-    set dmi_size [dict get $__JTAG_TAPS_INFO $tap_num dmi_size]
+    set tap_info [__SC_JTAGLIB_INTERNAL::sc_jtaglib_get_tap_info $tap_num]
 
-    set error_return_value [expr {(1 << $dmi_size) - 1}]
+    set tap_name [dict get $tap_info name]
+    set dmi_size [dict get $tap_info dmi_size]
+    set dtmcs_idle [dict get $tap_info idle]
 
     if {$op != "read" && $op != "write" && $op != "nop"} {
         error "dmi_scan->Incorrect operation"
     }
 
-    set shifted_address [expr {$address << 34}]
-    set shifted_data    [expr {$data    << 2 }]
-    set dmi_op 0
+    set shifted_address [expr {$address << $DMI_ADDRESS_SHIFT}]
+    set shifted_data    [expr {$data << $DMI_DATA_SHIFT}]
+    set dmi_op $DMI_NOP
 
     switch $op {
-        nop     {set dmi_op 0}
-        read    {set dmi_op 1}
-        write   {set dmi_op 2}
+        nop     {set dmi_op $DMI_NOP}
+        read    {set dmi_op $DMI_READ}
+        write   {set dmi_op $DMI_WRITE}
         default {
             error "dmi_scan->Incorrect operation; unreachable"
         }
@@ -274,17 +578,30 @@ proc ocdjtag_riscv_dmi_scan { tap_num address data op } {
     set dmi_val [expr {$shifted_address | $shifted_data | $dmi_op}]
     set hex_dmi_val 0x[format %x $dmi_val]
 
-    __SC_JTAGLIB_INTERNAL::sc_jtaglib_dmi_scan_timeout $tap_name $dmi_size $hex_dmi_val
+    set code [catch {
+        __SC_JTAGLIB_INTERNAL::sc_jtaglib_dmi_scan_timeout \
+            $tap_name $dmi_size $hex_dmi_val $dtmcs_idle
+    } result options]
+    if {$code} {
+        set message "dmi_scan->TAP $tap_name request $hex_dmi_val: $result"
+        if {$code == 1} {
+            return -code error -errorinfo [dict get $options -errorinfo] $message
+        }
+        return -code $code $message
+    }
 
     if {$op == "read"} {
-        return [__SC_JTAGLIB_INTERNAL::sc_jtaglib_dmi_scan_timeout $tap_name $dmi_size $hex_dmi_val]
+        return $result
     }
 }
 
 proc ocdjtag_riscv_dmi_read { tap_num address } {
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_DATA_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_DATA_MASK
+
     set dmi_bitval [ocdjtag_riscv_dmi_scan $tap_num $address 0 read]
 
-    return [expr {($dmi_bitval >> 2) & 0xffffffff}]
+    return [expr {($dmi_bitval >> $DMI_DATA_SHIFT) & $DMI_DATA_MASK}]
 }
 
 proc ocdjtag_riscv_dmi_write { tap_num address data } {
@@ -292,52 +609,87 @@ proc ocdjtag_riscv_dmi_write { tap_num address data } {
 }
 
 proc ocdjtag_riscv_get_dtmcs { tap_num } {
-    ocdjtag_riscv_update_taps_info
-    global __JTAG_TAPS_INFO
+    variable ::__SC_JTAGLIB_INTERNAL::IR_DTMCS
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_DMIRESET
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_IDLE_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_IDLE_VALUE_MASK
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_DMISTAT_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_DMISTAT_VALUE_MASK
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_ABITS_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_ABITS_VALUE_MASK
+    variable ::__SC_JTAGLIB_INTERNAL::DTMCS_VERSION_MASK
 
-    set tap_name [dict get $__JTAG_TAPS_INFO $tap_num name]
+    set tap_info [__SC_JTAGLIB_INTERNAL::sc_jtaglib_get_tap_info $tap_num]
 
-    set dtmcs_reg 0x10
-    irscan $tap_name $dtmcs_reg
-    set dtmcs_bitval 0x[drscan $tap_name 32 0x0]
+    set tap_name [dict get $tap_info name]
+
+    irscan $tap_name $IR_DTMCS
+    set dtmcs_bitval [format 0x%s [drscan $tap_name 32 0x0]]
 
     return [dict create \
-        dmireset [expr {($dtmcs_bitval >> 16) & 0x1}] \
-        idle     [expr {($dtmcs_bitval >> 12) & 0x7}] \
-        dmistat  [expr {($dtmcs_bitval >> 10) & 0x3}] \
-        abits    [expr {($dtmcs_bitval >> 4)  & 0x3f}] \
-        version  [expr {($dtmcs_bitval) & 0xf}] \
+        dmireset [expr {($dtmcs_bitval & $DTMCS_DMIRESET) != 0}] \
+        idle     [expr {
+            ($dtmcs_bitval >> $DTMCS_IDLE_SHIFT) &
+            $DTMCS_IDLE_VALUE_MASK
+        }] \
+        dmistat  [expr {
+            ($dtmcs_bitval >> $DTMCS_DMISTAT_SHIFT) &
+            $DTMCS_DMISTAT_VALUE_MASK
+        }] \
+        abits    [expr {
+            ($dtmcs_bitval >> $DTMCS_ABITS_SHIFT) &
+            $DTMCS_ABITS_VALUE_MASK
+        }] \
+        version  [expr {$dtmcs_bitval & $DTMCS_VERSION_MASK}] \
         is_zero  [expr {$dtmcs_bitval == 0}] \
     ]
     # is_zero is not a field of register, it's created just for using in examine_hart function
 }
 
+# Activate low-level access and replace the cached discovery information.
 proc ocdjtag_riscv_update_taps_info {} {
     global __JTAG_TAPS_INFO
+    variable ::__SC_JTAGLIB_INTERNAL::DMI_ADDRESS_SHIFT
+    set __JTAG_TAPS_INFO [dict create]
+    # Without initialized targets, OpenOCD has no background polling to disable.
+    if {[llength [info commands poll]]} {
+        poll off
+        echo "!!! WARNING: TARGET POLLING DISABLED FOR LOW-LEVEL JTAG !!!"
+        echo "DEVICE ACCESS WITH POLLING ENABLED IS UNDEFINED BEHAVIOR."
+        echo "Such calls are allowed only because this Tcl API cannot"
+        echo "reliably detect and reject them. Keep polling off until"
+        echo "all low-level JTAG work is finished."
+    }
 
     set scan_chain_result [__SC_JTAGLIB_INTERNAL::sc_jtaglib_parse_scan_chain [scan_chain]]
 
     set tap_count [dict get $scan_chain_result tap_count]
 
-    dict set __JTAG_TAPS_INFO tap_count $tap_count
+    set taps_info [dict create tap_count $tap_count]
 
     for {set i 0} {$i < $tap_count} {incr i} {
         set tap_name [dict get $scan_chain_result tap_list $i]
 
-        dict set __JTAG_TAPS_INFO $i name $tap_name
+        dict set taps_info $i name $tap_name
 
         set dtmcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_get_dtmcs_by_name $tap_name]
 
-        dict set __JTAG_TAPS_INFO $i abits [dict get $dtmcs abits]
-        dict set __JTAG_TAPS_INFO $i dmi_size [expr {34 + [dict get $dtmcs abits]}]
-        dict set __JTAG_TAPS_INFO $i idle [dict get $dtmcs idle]
+        dict set taps_info $i abits [dict get $dtmcs abits]
+        dict set taps_info $i dmi_size \
+            [expr {$DMI_ADDRESS_SHIFT + [dict get $dtmcs abits]}]
+        dict set taps_info $i idle [dict get $dtmcs idle]
     }
+    set __JTAG_TAPS_INFO $taps_info
+    return
 }
 
+# Return the last successful discovery without accessing the device.
 proc ocdjtag_riscv_get_taps_info {} {
-    ocdjtag_riscv_update_taps_info
     global __JTAG_TAPS_INFO
 
+    if {![dict exists $__JTAG_TAPS_INFO tap_count]} {
+        error "TAP information is not initialized; run ocdjtag_riscv_update_taps_info"
+    }
     return $__JTAG_TAPS_INFO
 }
 
@@ -401,21 +753,42 @@ proc ocdjtag_riscv_get_hartinfo { tap_num } {
 }
 
 proc ocdjtag_riscv_get_sbcs { tap_num } {
+    variable ::__SC_JTAGLIB_INTERNAL::DM_SBCS
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBVERSION_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBVERSION_VALUE_MASK
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBACCESS_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBACCESS_VALUE_MASK
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBERROR_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBERROR_VALUE_MASK
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBASIZE_SHIFT
+    variable ::__SC_JTAGLIB_INTERNAL::SBCS_SBASIZE_VALUE_MASK
+
     __SC_JTAGLIB_INTERNAL::sc_jtaglib_verbose "\[$tap_num\] reading sbcs" 3
 
-    set sbcs_reg 0x38
-    set sbcs_bitval [ocdjtag_riscv_dmi_read $tap_num $sbcs_reg]
+    set sbcs_bitval [ocdjtag_riscv_dmi_read $tap_num $DM_SBCS]
 
     return [dict create \
-        sbversion       [expr {($sbcs_bitval >> 29) & 0x7}] \
+        sbversion       [expr {
+            ($sbcs_bitval >> $SBCS_SBVERSION_SHIFT) &
+            $SBCS_SBVERSION_VALUE_MASK
+        }] \
         sbbusyerror     [expr {($sbcs_bitval >> 22) & 0x1}] \
         sbbusy          [expr {($sbcs_bitval >> 21) & 0x1}] \
         sbreadonaddr    [expr {($sbcs_bitval >> 20) & 0x1}] \
-        sbaccess        [expr {($sbcs_bitval >> 17) & 0x3}] \
+        sbaccess        [expr {
+            ($sbcs_bitval >> $SBCS_SBACCESS_SHIFT) &
+            $SBCS_SBACCESS_VALUE_MASK
+        }] \
         sbautoincrement [expr {($sbcs_bitval >> 16) & 0x1}] \
         sbreadondata    [expr {($sbcs_bitval >> 15) & 0x1}] \
-        sberror         [expr {($sbcs_bitval >> 12) & 0x3}] \
-        sbasize         [expr {($sbcs_bitval >> 5)  & 0x7}] \
+        sberror         [expr {
+            ($sbcs_bitval >> $SBCS_SBERROR_SHIFT) &
+            $SBCS_SBERROR_VALUE_MASK
+        }] \
+        sbasize         [expr {
+            ($sbcs_bitval >> $SBCS_SBASIZE_SHIFT) &
+            $SBCS_SBASIZE_VALUE_MASK
+        }] \
         sbaccess128     [expr {($sbcs_bitval >> 4) & 0x1}] \
         sbaccess64      [expr {($sbcs_bitval >> 3) & 0x1}] \
         sbaccess32      [expr {($sbcs_bitval >> 2) & 0x1}] \
@@ -440,25 +813,42 @@ proc ocdjtag_riscv_get_abstractcs { tap_num } {
 
 #end of getter for DM registers
 
-# return cmderr value of abstract register
+# Access system memory through the Debug Module without examining the hart.
+# The DM must already be active and authenticated.
+proc ocdjtag_riscv_sba_read { tap_num address size } {
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    set words [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_validate $sbcs $address $size]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_clear_errors $tap_num $sbcs
+
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_configure $tap_num $size read
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_set_address $tap_num [dict get $sbcs sbasize] $words
+
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_check_errors $sbcs
+    set data [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_read_data $tap_num $size]
+    lassign $data low high
+    if {$size == 64} {
+        return [format 0x%08x%08x $high $low]
+    }
+    return [format 0x%0*x [expr {$size / 4}] [expr {$low & ((1 << $size) - 1)}]]
+}
+
+proc ocdjtag_riscv_sba_write { tap_num address size value } {
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    set words [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_validate $sbcs $address $size]
+    set data [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_words $value $size value]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_clear_errors $tap_num $sbcs
+
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_configure $tap_num $size write
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_set_address $tap_num [dict get $sbcs sbasize] $words
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_write_data $tap_num $size $data
+    set sbcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_wait_idle $tap_num]
+    __SC_JTAGLIB_INTERNAL::sc_jtaglib_sba_check_errors $sbcs
+}
+
+# Wait for abstract command completion and report any hardware error.
 proc ocdjtag_riscv_check_cmderr { tap_num } {
-    set abstractcs [ocdjtag_riscv_get_abstractcs $tap_num]
-
-    set timeout_ms [__SC_JTAGLIB_INTERNAL::sc_jtaglib_get_op_latency]
-
-    set start [clock milliseconds]
-    set cur $start
-
-    while {[expr {([dict get $abstractcs busy] == 1) && ($cur - $start < $timeout_ms)}]} {
-        set abstractcs [ocdjtag_riscv_get_abstractcs $tap_num]
-
-        set cur [clock milliseconds]
-    }
-
-    if {($cur - $start) >= $timeout_ms} {
-        error "check_cmderr->Timed out during running abstract command"
-    }
-
+    set abstractcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_wait_abstractcs $tap_num]
     set cmderr [dict get $abstractcs cmderr]
 
     if {$cmderr != 0} {
@@ -514,18 +904,19 @@ proc ocdjtag_riscv_step_hart { tap_num } {
         error "step->Target is not halted"
     }
 
+    set xlen [ocdjtag_riscv_get_xlen $tap_num]
     set dcsr_reg 0x7b0
-    set dcsr_val [ocdjtag_riscv_load_register $tap_num $dcsr_reg]
+    set dcsr_val [ocdjtag_riscv_load_register $tap_num $dcsr_reg $xlen]
     #setting step bit
     set dcsr_val [expr {$dcsr_val | (1 << 2)}]
-    ocdjtag_riscv_store_register $tap_num $dcsr_reg $dcsr_val
+    ocdjtag_riscv_store_register $tap_num $dcsr_reg $dcsr_val $xlen
 
     ocdjtag_riscv_resume_hart $tap_num 1
 
     #clearing step bit
-    set dcsr_val [ocdjtag_riscv_load_register $tap_num $dcsr_reg]
+    set dcsr_val [ocdjtag_riscv_load_register $tap_num $dcsr_reg $xlen]
     set dcsr_val [expr {$dcsr_val & (0xffffffff & ~(1 << 2))}]
-    ocdjtag_riscv_store_register $tap_num $dcsr_reg $dcsr_val
+    ocdjtag_riscv_store_register $tap_num $dcsr_reg $dcsr_val $xlen
 }
 
 proc ocdjtag_riscv_resume_hart { tap_num {for_step 0} } {
@@ -605,7 +996,6 @@ proc ocdjtag_riscv_reset_dm { tap_num } {
 }
 
 proc ocdjtag_riscv_examine_hart { tap_num } {
-    ocdjtag_riscv_update_taps_info
     global __JTAG_TAPS_INFO
 
     set dtmcontrol [ocdjtag_riscv_get_dtmcs $tap_num]
@@ -619,8 +1009,6 @@ proc ocdjtag_riscv_examine_hart { tap_num } {
     if {[dict get $dtmcontrol version] != 1} {
         error "examine_hart->Unsupported DTM version [dict get $dtmcontrol version]"
     }
-
-    ocdjtag_riscv_update_taps_info
 
     if {[dict get $__JTAG_TAPS_INFO tap_count] == 0} {
         error "examine_hart->No harts found"
@@ -685,30 +1073,49 @@ proc ocdjtag_riscv_examine_hart { tap_num } {
 
     ocdjtag_riscv_halt_hart $tap_num
 
-    set xlen 64
-    if {[catch {__SC_JTAGLIB_INTERNAL::sc_jtaglib_register_read_abstract $tap_num 8 64} result]} {
-        set xlen 32
-        ocdjtag_riscv_clear_cmderr $tap_num
-    }
-
-    #if result of execution register_read_abstract isn't successful (returned 0),
-    #xlen remains 32, in other case (returned 1), xlen become 64
-
+    set xlen [ocdjtag_riscv_get_xlen $tap_num]
     __SC_JTAGLIB_INTERNAL::sc_jtaglib_verbose "xlen: $xlen"
 }
 
 #functions for register access
 
-proc ocdjtag_riscv_load_register { tap_num reg_num } {
-    # getting a registers size
-    set aarsize [__SC_JTAGLIB_INTERNAL::sc_jtaglib_get_aarsize $tap_num]
-
+# Discover the 32/64-bit debug register width of the selected, halted hart.
+# Read x5 (t0) without changing it; the DM's command/data registers are used.
+proc ocdjtag_riscv_get_xlen { tap_num } {
     set dmstatus [ocdjtag_riscv_get_dmstatus $tap_num]
-    set allhalted [dict get $dmstatus allhalted]
-
-    if {$allhalted == 0} {
-        error "load_register->Target should be halted"
+    if {![dict get $dmstatus allhalted]} {
+        error "get_xlen->Target should be halted"
     }
+    # Do not confuse a pre-existing error with a failed width probe.
+    ocdjtag_riscv_check_cmderr $tap_num
+
+    foreach xlen {64 32} {
+        set command [__SC_JTAGLIB_INTERNAL::sc_jtaglib_access_register_command \
+            $tap_num 5 $xlen 0x20000]
+        ocdjtag_riscv_dmi_write $tap_num 0x17 $command
+        set abstractcs [__SC_JTAGLIB_INTERNAL::sc_jtaglib_wait_abstractcs $tap_num]
+        set cmderr [dict get $abstractcs cmderr]
+        if {$cmderr == 0} {
+            return $xlen
+        }
+        # A too-wide access can be unsupported or fault during execution.
+        # Verify the narrower access instead of assuming either error means RV32.
+        if {$xlen == 64 && ($cmderr == 2 || $cmderr == 3)} {
+            ocdjtag_riscv_clear_cmderr $tap_num
+            ocdjtag_riscv_check_cmderr $tap_num
+        } else {
+            error "cmderr=$cmderr"
+        }
+    }
+}
+
+# XLEN must be supplied as 32 or 64; reading a register never probes a GPR.
+# The DM decides whether the requested register is accessible while running.
+proc ocdjtag_riscv_load_register { tap_num reg_num xlen } {
+    if {![string is integer -strict $xlen] || ($xlen != 32 && $xlen != 64)} {
+        error "load_register->XLEN must be 32 or 64 bits: \"$xlen\""
+    }
+    set aarsize [expr {$xlen == 32 ? 2 : 3}]
 
     set data0_register 0x4
     set data1_register 0x5
@@ -723,7 +1130,8 @@ proc ocdjtag_riscv_load_register { tap_num reg_num } {
     set load_result [ocdjtag_riscv_dmi_read $tap_num $data0_register]
 
     if {$aarsize == 3} {
-        set load_result [expr {[ocdjtag_riscv_dmi_read $tap_num $data1_register] << 32 | $load_result}]
+        set high [ocdjtag_riscv_dmi_read $tap_num $data1_register]
+        set load_result [expr {$high << 32 | $load_result}]
     }
 
     set load_result 0x[format %x $load_result]
@@ -731,7 +1139,10 @@ proc ocdjtag_riscv_load_register { tap_num reg_num } {
     return $load_result
 }
 
-proc ocdjtag_riscv_store_register { tap_num reg_num data } {
+proc ocdjtag_riscv_store_register { tap_num reg_num data xlen } {
+    if {![string is integer -strict $xlen] || ($xlen != 32 && $xlen != 64)} {
+        error "store_register->XLEN must be 32 or 64 bits: \"$xlen\""
+    }
     if {![string is integer -strict $data]} {
         error "store_register->incorrect data: should be integer value"
     }
@@ -740,8 +1151,7 @@ proc ocdjtag_riscv_store_register { tap_num reg_num data } {
         error "store_register->incorrect data: should be more than 0"
     }
 
-    # getting a registers size
-    set aarsize [__SC_JTAGLIB_INTERNAL::sc_jtaglib_get_aarsize $tap_num]
+    set aarsize [expr {$xlen == 32 ? 2 : 3}]
 
     set dmstatus [ocdjtag_riscv_get_dmstatus $tap_num]
     set allhalted [dict get $dmstatus allhalted]
