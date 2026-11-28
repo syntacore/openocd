@@ -7,7 +7,7 @@
 # TAPs and disable polling. Keep polling off during low-level access.
 # Refresh explicitly after topology changes or device reconfiguration.
 #
-# Copyright (c) 2023-2025, Syntacore LLC
+# Copyright (c) 2023-2026, Syntacore LLC
 
 set __JTAG_TAPS_INFO [dict create]
 
